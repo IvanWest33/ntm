@@ -559,33 +559,27 @@ func (le *LoopExecutor) executeIteration(ctx context.Context, step *Step, loop *
 		default:
 		}
 
-		// Check for loop control statements
-		if nestedStep.LoopControl == LoopControlBreak {
-			// Evaluate condition if present
-			if nestedStep.When != "" {
-				skip, err := le.executor.evaluateCondition(nestedStep.When)
-				if err == nil && !skip {
-					// Condition is true, break
-					return results, true, false
-				}
-			} else {
-				// Unconditional break
+		// Pure-control-only steps (loop_control + optional when, no body)
+		// apply their directive without dispatching a body. Steps that
+		// carry real work (command/template/prompt/etc.) execute the body
+		// first and only apply the directive after a successful run, so
+		// loop_control no longer silently masks intended side effects
+		// (matches the foreach contract from bd-9yuk0 / bd-1iabq).
+		if foreachControlOnlyStep(nestedStep) {
+			control, applies, condErr := loopControlAppliesForStep(nestedStep, le.executor)
+			if condErr != nil {
+				// Surface a failed control-condition like other failures: log
+				// and stop the iteration. Mirrors foreach behaviour for
+				// failed when-condition evaluation on a control-only step.
 				return results, true, false
 			}
-			continue
-		}
-
-		if nestedStep.LoopControl == LoopControlContinue {
-			// Evaluate condition if present
-			if nestedStep.When != "" {
-				skip, err := le.executor.evaluateCondition(nestedStep.When)
-				if err == nil && !skip {
-					// Condition is true, continue
+			if applies {
+				switch control {
+				case LoopControlBreak:
+					return results, true, false
+				case LoopControlContinue:
 					return results, false, true
 				}
-			} else {
-				// Unconditional continue
-				return results, false, true
 			}
 			continue
 		}
@@ -615,9 +609,45 @@ func (le *LoopExecutor) executeIteration(ctx context.Context, step *Step, loop *
 				// Continue with next step in iteration
 			}
 		}
+
+		// Apply the loop_control directive after the body has executed
+		// successfully so workflows can express "do X then break" without
+		// losing X.
+		if result.Status == StatusCompleted {
+			if control, applies := foreachLoopControlValue(nestedStep); applies {
+				switch control {
+				case LoopControlBreak:
+					return results, true, false
+				case LoopControlContinue:
+					return results, false, true
+				}
+			}
+		}
 	}
 
 	return results, false, false
+}
+
+// loopControlAppliesForStep evaluates a control-only step's optional when
+// condition and reports whether the directive should fire. evaluateCondition
+// returns "should skip" semantics (true means condition was false), so the
+// control fires only when the condition resolves truthy (skip == false).
+func loopControlAppliesForStep(step Step, e *Executor) (LoopControl, bool, error) {
+	control, ok := foreachLoopControlValue(step)
+	if !ok {
+		return LoopControlNone, false, nil
+	}
+	if step.When == "" {
+		return control, true, nil
+	}
+	skip, err := e.evaluateCondition(step.When)
+	if err != nil {
+		return LoopControlNone, false, err
+	}
+	if skip {
+		return LoopControlNone, false, nil
+	}
+	return control, true, nil
 }
 
 // resolveItems resolves an items expression to an array of values.

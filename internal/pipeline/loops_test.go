@@ -400,6 +400,92 @@ func TestLoopMaxIterationsLiteralStillWorks(t *testing.T) {
 	}
 }
 
+func TestExecuteIterationLoopControlBodyRunsBeforeBreak(t *testing.T) {
+	// A loop body step that combines real work (command/template/prompt)
+	// with loop_control: break must execute the body first and only break
+	// AFTER the body completes. The legacy behaviour applied loop_control
+	// before dispatch and silently dropped the body's side effects, which
+	// foreach already fixed via bd-9yuk0; loops.go must match that contract.
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "loop-ctrl-body",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{
+			{
+				ID: "outer",
+				Loop: &LoopConfig{
+					Times: 5,
+					Steps: []Step{
+						{
+							ID:          "do_then_break",
+							Command:     "true",
+							LoopControl: LoopControlBreak,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	cfg := DefaultExecutorConfig("test-session")
+	cfg.DryRun = true
+	executor := NewExecutor(cfg)
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := state.Steps["outer_iter0_do_then_break"].Status; got != StatusCompleted {
+		t.Errorf("body status = %v, want %v (body must run before break)", got, StatusCompleted)
+	}
+	// Loop should break after the first iteration (only iter0 body, no iter1).
+	if _, ran := state.Steps["outer_iter1_do_then_break"]; ran {
+		t.Error("iter1 body executed; expected break after iter0")
+	}
+}
+
+func TestExecuteIterationControlOnlyStepStillBreaks(t *testing.T) {
+	// A pure control-only step (no command/template/prompt body, only
+	// loop_control + optional when) must still apply the directive
+	// without trying to dispatch a non-existent body. This case ensures
+	// the new "execute body first" path doesn't inadvertently dispatch
+	// empty steps as commands.
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "loop-ctrl-only",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{
+			{
+				ID: "outer",
+				Loop: &LoopConfig{
+					Times: 3,
+					Steps: []Step{
+						{
+							ID:          "guard",
+							LoopControl: LoopControlBreak,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	cfg := DefaultExecutorConfig("test-session")
+	cfg.DryRun = true
+	executor := NewExecutor(cfg)
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	// Control-only step should not produce a recorded body result.
+	if _, ran := state.Steps["outer_iter0_guard"]; ran {
+		t.Error("control-only guard body executed; expected pure-control fast path")
+	}
+	// Outer loop step itself should be completed (broke on iter0).
+	if got := state.Steps["outer"].Status; got != StatusCompleted {
+		t.Errorf("outer loop status = %v, want %v", got, StatusCompleted)
+	}
+}
+
 func TestLoopMaxIterationsExprFailsWhenUnresolvable(t *testing.T) {
 	// Safety caps must fail closed: an explicit max_iterations expression that
 	// cannot resolve to a positive integer (typo, missing default, malformed
