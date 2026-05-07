@@ -308,3 +308,75 @@ func TestStartFrom_FromStateWithoutStartFrom_IsRejectedAtCLI(t *testing.T) {
 		}
 	}
 }
+
+// TestStartFrom_FromState_RestoresParallelChildOutputs covers bd-wak1i:
+// when --start-from skips a parallel container, the inline children's
+// persisted outputs must also be restored so downstream steps that read
+// ${steps.<child>.output} resolve cleanly. The transitive dep set captured
+// only the parent group ID; the children are added via container expansion.
+func TestStartFrom_FromState_RestoresParallelChildOutputs(t *testing.T) {
+	prior := &ExecutionState{
+		RunID:     "prior-run",
+		Variables: map[string]interface{}{},
+		Steps: map[string]StepResult{
+			"prep":      {StepID: "prep", Status: StatusCompleted, Output: "prior-prep"},
+			"group":     {StepID: "group", Status: StatusCompleted, Output: "prior-group"},
+			"research":  {StepID: "research", Status: StatusCompleted, Output: "prior-research-output"},
+			"prototype": {StepID: "prototype", Status: StatusCompleted, Output: "prior-prototype-output"},
+		},
+	}
+
+	cfg := DefaultExecutorConfig("test-session")
+	cfg.DryRun = true
+	cfg.StartFromStep = "after"
+	cfg.StartFromState = prior
+	e := NewExecutor(cfg)
+
+	wf := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "start-from-parallel",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{
+			{ID: "prep", Prompt: "prep"},
+			{
+				ID:        "group",
+				DependsOn: []string{"prep"},
+				Parallel: ParallelSpec{Steps: []Step{
+					{ID: "research", Prompt: "research"},
+					{ID: "prototype", Prompt: "prototype"},
+				}},
+			},
+			{
+				ID:        "after",
+				DependsOn: []string{"group"},
+				Prompt:    "consume ${steps.research.output} and ${steps.prototype.output}",
+			},
+		},
+	}
+
+	state, err := e.Run(context.Background(), wf, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() = %v, want nil", err)
+	}
+
+	for _, id := range []string{"research", "prototype"} {
+		got, ok := state.Steps[id]
+		if !ok {
+			t.Fatalf("parallel child %q missing from state.Steps after start-from restoration", id)
+		}
+		if got.Status != StatusSkipped {
+			t.Errorf("parallel child %q status = %v, want Skipped", id, got.Status)
+		}
+		if got.Output != prior.Steps[id].Output {
+			t.Errorf("parallel child %q output = %q, want %q", id, got.Output, prior.Steps[id].Output)
+		}
+	}
+
+	after := state.Steps["after"]
+	if after.Status != StatusCompleted {
+		t.Fatalf("after.Status = %v, want Completed", after.Status)
+	}
+	if !strings.Contains(after.Output, "prior-research-output") || !strings.Contains(after.Output, "prior-prototype-output") {
+		t.Fatalf("after.Output = %q, want both prior child outputs substituted", after.Output)
+	}
+}

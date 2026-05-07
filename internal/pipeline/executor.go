@@ -3418,6 +3418,62 @@ func findStepContainer(workflow *Workflow, stepID string) (parentID, kind string
 	return
 }
 
+// expandContainerChildren adds the static inline children of `id`
+// (parallel/loop bodies) to skipSet, recursively. Inline children share their
+// parent's depends_on edges only implicitly (via the parent's graph node), so
+// applyStartFrom must walk the workflow definition itself to surface them.
+// Foreach/foreach_pane bodies are excluded: their persisted IDs are
+// iteration-specific (e.g. <body>_iter0) and not knowable from the static
+// definition alone (bd-wak1i).
+func expandContainerChildren(workflow *Workflow, id string, skipSet map[string]struct{}) {
+	if workflow == nil || skipSet == nil {
+		return
+	}
+	var find func(steps []Step) *Step
+	find = func(steps []Step) *Step {
+		for i := range steps {
+			s := &steps[i]
+			if s.ID == id {
+				return s
+			}
+			if len(s.Parallel.Steps) > 0 {
+				if hit := find(s.Parallel.Steps); hit != nil {
+					return hit
+				}
+			}
+			if s.Loop != nil && len(s.Loop.Steps) > 0 {
+				if hit := find(s.Loop.Steps); hit != nil {
+					return hit
+				}
+			}
+		}
+		return nil
+	}
+	step := find(workflow.Steps)
+	if step == nil {
+		return
+	}
+	var addChildren func(steps []Step)
+	addChildren = func(steps []Step) {
+		for i := range steps {
+			child := &steps[i]
+			skipSet[child.ID] = struct{}{}
+			if len(child.Parallel.Steps) > 0 {
+				addChildren(child.Parallel.Steps)
+			}
+			if child.Loop != nil && len(child.Loop.Steps) > 0 {
+				addChildren(child.Loop.Steps)
+			}
+		}
+	}
+	if len(step.Parallel.Steps) > 0 {
+		addChildren(step.Parallel.Steps)
+	}
+	if step.Loop != nil && len(step.Loop.Steps) > 0 {
+		addChildren(step.Loop.Steps)
+	}
+}
+
 // applyStartFrom synthesizes Skipped step results for every transitive
 // dependency of e.config.StartFromStep, copies prior outputs from
 // e.config.StartFromState when available, and marks those steps executed in
@@ -3454,6 +3510,21 @@ func (e *Executor) applyStartFrom(workflow *Workflow) error {
 	if len(skipSet) == 0 {
 		// Nothing to skip; target had no dependencies.
 		return nil
+	}
+
+	// bd-wak1i: depends_on edges only reach top-level container IDs, so the
+	// transitive set above misses the inline children of any skipped
+	// parallel/loop group. Downstream prompts that read
+	// ${steps.<child>.output} would then fall through unresolved despite
+	// the prior run persisting those child results. Expand the skip set so
+	// each container's static inline children are restored alongside the
+	// container itself.
+	containerExpansion := make([]string, 0)
+	for id := range skipSet {
+		containerExpansion = append(containerExpansion, id)
+	}
+	for _, id := range containerExpansion {
+		expandContainerChildren(workflow, id, skipSet)
 	}
 
 	// Synthesize results in deterministic order so log output and persisted
