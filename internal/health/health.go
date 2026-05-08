@@ -109,9 +109,10 @@ type HealthSummary struct {
 const (
 	// Keep detection windows small so stale historical messages don't dominate
 	// health classification once an agent has recovered and is back at prompt.
-	rateLimitLookbackLines   = 20
-	errorLookbackLines       = 20
-	processExitLookbackLines = 12
+	rateLimitLookbackLines     = 20
+	errorLookbackLines         = 20
+	criticalErrorLookbackLines = 50
+	processExitLookbackLines   = 12
 )
 
 // CheckSession performs health checks on all agents in a session
@@ -233,7 +234,7 @@ func checkAgent(ctx context.Context, pa tmux.PaneActivity) AgentHealth {
 	}
 
 	// Check for other error patterns (skipping rate limit since we already checked)
-	otherIssues := detectErrors(recentOutput)
+	otherIssues := detectErrorsForAgent(output, string(pa.Pane.Type))
 	for _, issue := range otherIssues {
 		if issue.Type != "rate_limit" {
 			agent.Issues = append(agent.Issues, issue)
@@ -266,36 +267,82 @@ func detectErrors(output string) []Issue {
 	errorTypes := status.DetectAllErrorsInOutput(output)
 
 	for _, et := range errorTypes {
-		var typeStr string
-		var message string
-
-		switch et {
-		case status.ErrorRateLimit:
-			typeStr = "rate_limit"
-			message = "Rate limit detected"
-		case status.ErrorCrash:
-			typeStr = "crash"
-			message = "Agent crashed"
-		case status.ErrorAuth:
-			typeStr = "auth_error"
-			message = "Authentication error"
-		case status.ErrorConnection:
-			typeStr = "network_error"
-			message = "Network error"
-		case status.ErrorGeneric:
-			typeStr = "error"
-			message = "Error detected"
-		default:
+		issue, ok := issueForErrorType(et)
+		if !ok {
 			continue
 		}
-
-		issues = append(issues, Issue{
-			Type:    typeStr,
-			Message: message,
-		})
+		issues = append(issues, issue)
 	}
 
 	return issues
+}
+
+func detectErrorsForAgent(output string, agentType string) []Issue {
+	scanOutput := output
+	atPrompt := agentType != "" && status.DetectIdleFromOutput(output, agentType)
+	if atPrompt {
+		scanOutput = outputAfterRecentPrompt(output, agentType)
+	}
+
+	issues := detectErrors(scanOutput)
+	if agentType == "" || atPrompt {
+		return issues
+	}
+
+	criticalOutput := util.GetLastNLines(output, criticalErrorLookbackLines)
+	for _, et := range status.DetectAllErrorsInOutput(criticalOutput) {
+		if et != status.ErrorCrash || hasIssueType(issues, "crash") {
+			continue
+		}
+		issue, ok := issueForErrorType(et)
+		if ok {
+			issues = append(issues, issue)
+		}
+	}
+
+	return issues
+}
+
+func outputAfterRecentPrompt(output string, agentType string) string {
+	lines := strings.Split(status.StripANSI(output), "\n")
+	linesChecked := 0
+	for i := len(lines) - 1; i >= 0 && linesChecked < 3; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		linesChecked++
+		if status.IsPromptLine(line, agentType) {
+			return strings.Join(lines[i+1:], "\n")
+		}
+	}
+	return output
+}
+
+func issueForErrorType(et status.ErrorType) (Issue, bool) {
+	switch et {
+	case status.ErrorRateLimit:
+		return Issue{Type: "rate_limit", Message: "Rate limit detected"}, true
+	case status.ErrorCrash:
+		return Issue{Type: "crash", Message: "Agent crashed"}, true
+	case status.ErrorAuth:
+		return Issue{Type: "auth_error", Message: "Authentication error"}, true
+	case status.ErrorConnection:
+		return Issue{Type: "network_error", Message: "Network error"}, true
+	case status.ErrorGeneric:
+		return Issue{Type: "error", Message: "Error detected"}, true
+	default:
+		return Issue{}, false
+	}
+}
+
+func hasIssueType(issues []Issue, issueType string) bool {
+	for _, issue := range issues {
+		if issue.Type == issueType {
+			return true
+		}
+	}
+	return false
 }
 
 // parseWaitTime extracts the suggested wait time in seconds from rate limit messages

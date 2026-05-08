@@ -74,6 +74,48 @@ func TestDetectErrors_IgnoresStaleHistoryBeyondLookback(t *testing.T) {
 	}
 }
 
+func TestDetectErrorsForAgent_DetectsCrashBeyondShortLookbackWithoutPrompt(t *testing.T) {
+	t.Parallel()
+
+	output := "panic: unrecovered crash\n" +
+		strings.Repeat("compilation output\n", errorLookbackLines+5)
+
+	issues := detectErrorsForAgent(output, "cc")
+	if !hasIssueType(issues, "crash") {
+		t.Fatalf("detectErrorsForAgent missed unrecovered crash beyond short lookback: %+v", issues)
+	}
+}
+
+func TestDetectErrorsForAgent_IgnoresRecoveredCrashAtPrompt(t *testing.T) {
+	t.Parallel()
+
+	output := "panic: recovered crash\n" +
+		strings.Repeat("working normally\n", errorLookbackLines+5) +
+		"claude>\n"
+
+	issues := detectErrorsForAgent(output, "cc")
+	if len(issues) != 0 {
+		t.Fatalf("detectErrorsForAgent returned %d issue(s) from recovered history, want 0: %+v", len(issues), issues)
+	}
+}
+
+func TestDetectErrorsForAgent_DetectsErrorAfterPrompt(t *testing.T) {
+	t.Parallel()
+
+	output := "panic: recovered crash\n" +
+		strings.Repeat("working normally\n", errorLookbackLines+5) +
+		"claude>\n" +
+		"error: command failed\n"
+
+	issues := detectErrorsForAgent(output, "cc")
+	if !hasIssueType(issues, "error") {
+		t.Fatalf("detectErrorsForAgent missed error after prompt: %+v", issues)
+	}
+	if hasIssueType(issues, "crash") {
+		t.Fatalf("detectErrorsForAgent revived crash before prompt: %+v", issues)
+	}
+}
+
 func TestDetectRateLimitWithAgentContext(t *testing.T) {
 	t.Parallel()
 
