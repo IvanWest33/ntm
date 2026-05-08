@@ -48,9 +48,20 @@ func buildRoundOverrides(round, maxRounds int) map[string]interface{} {
 }
 
 // resolveForeachMaxRounds returns the resolved max_rounds for a foreach step.
-// Returns 1 when MaxRounds is unset (single round, the historical default
-// behavior). An explicit literal or expression that fails to resolve to a
-// positive integer returns an error so the iteration fails closed (bd-2ubxp.14).
+// Returns 1 when MaxRounds is unset, set to 0, or resolves through an
+// expression to a non-positive integer — the single-round historical
+// default. A substitution failure or a non-integer expression result still
+// returns a fail-closed error so misconfigured expressions don't silently
+// degrade (bd-2ubxp.14).
+//
+// bd-wapme: literal `max_rounds: 0` and expression-resolved `0` are now
+// treated identically (both → single round). They previously diverged:
+// literal 0 silently became 1, while expression 0 erroed loudly. The
+// "consistent error" alternative would have required a presence flag on
+// IntOrExpr to disambiguate "explicit 0" from "field omitted", which
+// breaks reflect.DeepEqual round-trip equality used by the json/toml
+// schema tests. Authors who want zero-rounds-as-error can gate via a
+// `when:` clause on the parent step.
 //
 // The expression form ("${defaults.hard_caps.foo}", "${vars.cap}", etc.) is
 // resolved against the executor's substitutor with workflow defaults applied,
@@ -76,6 +87,12 @@ func (e *Executor) resolveForeachMaxRounds(parent *Step) (int, error) {
 		return 1, nil
 	}
 	mr := fc.MaxRounds
+	// bd-wapme: an unset MaxRounds and a literal `max_rounds: 0` are
+	// indistinguishable at the IntOrExpr layer (both produce
+	// IntOrExpr{Value: 0, Expr: ""}) so they share the single-round
+	// default. Negative literals are rejected at parse time
+	// (parser.go::validateStep) — this defensive `<= 0` branch matches
+	// the historical contract.
 	if mr.Expr == "" && mr.Value <= 0 {
 		return 1, nil
 	}
@@ -103,8 +120,22 @@ func (e *Executor) resolveForeachMaxRounds(parent *Step) (int, error) {
 	if parseErr != nil {
 		return 0, fmt.Errorf("resolve max_rounds expression %q: parse %q as integer: %w", mr.Expr, resolved, parseErr)
 	}
+	// bd-wapme: a non-positive expression result is treated identically to
+	// a literal `max_rounds: 0` — silently default to a single round. The
+	// previous error-on-zero behaviour diverged from the literal path and
+	// surprised authors refactoring `max_rounds: 0` into
+	// `max_rounds: ${vars.zero}`. A non-integer (parseErr above) still
+	// fails closed because that's a configuration mistake, not a
+	// semantically-equivalent edge case.
 	if parsed <= 0 {
-		return 0, fmt.Errorf("resolve max_rounds expression %q: value %d must be > 0", mr.Expr, parsed)
+		slog.Debug("foreach.max_rounds expression resolved to non-positive value, defaulting to 1 round",
+			"run_id", e.runIDForLog(),
+			"step_id", parent.ID,
+			"agent_type", "foreach",
+			"expression", mr.Expr,
+			"resolved", parsed,
+		)
+		return 1, nil
 	}
 	roundsCap := e.limits.MaxForeachRounds
 	if roundsCap <= 0 {

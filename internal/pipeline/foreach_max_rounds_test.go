@@ -403,6 +403,97 @@ func TestForeachMaxRounds_OperatorOverrideRaisesCap(t *testing.T) {
 	}
 }
 
+// TestForeachMaxRounds_LiteralZeroAndExprZeroBothDefaultToOne covers
+// bd-wapme: literal `max_rounds: 0` and expression `${vars.zero}` (where
+// vars.zero == 0) used to diverge — literal silently became 1 round,
+// expression erroed with "value 0 must be > 0". Both now silently default
+// to a single round so refactoring `max_rounds: 0` into a dynamic
+// expression doesn't flip behaviour. Acceptance from the bead: the two
+// forms produce the same observable behaviour.
+func TestForeachMaxRounds_LiteralZeroAndExprZeroBothDefaultToOne(t *testing.T) {
+	t.Run("literal_zero", func(t *testing.T) {
+		executor := NewExecutor(DefaultExecutorConfig("max-rounds-literal-zero"))
+		workflow := &Workflow{
+			SchemaVersion: SchemaVersion,
+			Name:          "max-rounds-literal-zero-workflow",
+			Settings:      DefaultWorkflowSettings(),
+			Steps: []Step{{
+				ID: "fanout",
+				Foreach: &ForeachConfig{
+					Items:     `["only"]`,
+					As:        "item",
+					MaxRounds: IntOrExpr{Value: 0},
+					Steps: []Step{{
+						ID:      "noop",
+						Command: "true",
+					}},
+				},
+			}},
+		}
+
+		state, err := executor.Run(context.Background(), workflow, nil, nil)
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil (literal 0 should default to 1 round)", err)
+		}
+		if _, ok := state.Steps["fanout_iter0_noop"]; !ok {
+			t.Fatalf("expected single-round step ID 'fanout_iter0_noop', got keys: %v", stepKeys(state.Steps))
+		}
+		// Round-suffix should NOT be applied when max_rounds == 1.
+		for k := range state.Steps {
+			if strings.Contains(k, "_round") {
+				t.Errorf("step %q has _round suffix despite max_rounds=0 defaulting to 1", k)
+			}
+		}
+	})
+
+	t.Run("expression_resolves_to_zero", func(t *testing.T) {
+		executor := NewExecutor(DefaultExecutorConfig("max-rounds-expr-zero"))
+		workflow := &Workflow{
+			SchemaVersion: SchemaVersion,
+			Name:          "max-rounds-expr-zero-workflow",
+			Settings:      DefaultWorkflowSettings(),
+			Defaults: map[string]interface{}{
+				"hard_caps": map[string]interface{}{
+					"zero_rounds": 0,
+				},
+			},
+			Steps: []Step{{
+				ID: "fanout",
+				Foreach: &ForeachConfig{
+					Items:     `["only"]`,
+					As:        "item",
+					MaxRounds: IntOrExpr{Expr: "${defaults.hard_caps.zero_rounds}"},
+					Steps: []Step{{
+						ID:      "noop",
+						Command: "true",
+					}},
+				},
+			}},
+		}
+
+		state, err := executor.Run(context.Background(), workflow, nil, nil)
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil (expression resolving to 0 should default to 1 round, matching literal 0)", err)
+		}
+		if _, ok := state.Steps["fanout_iter0_noop"]; !ok {
+			t.Fatalf("expected single-round step ID 'fanout_iter0_noop', got keys: %v", stepKeys(state.Steps))
+		}
+		for k := range state.Steps {
+			if strings.Contains(k, "_round") {
+				t.Errorf("step %q has _round suffix despite expression resolving to 0 (should default to 1)", k)
+			}
+		}
+	})
+}
+
+func stepKeys(steps map[string]StepResult) []string {
+	out := make([]string, 0, len(steps))
+	for k := range steps {
+		out = append(out, k)
+	}
+	return out
+}
+
 // buildExpectedRoundStepID returns the state.Steps key for round N's
 // echo_round body step in the single-iteration max_rounds test fixtures
 // (parent=fanout, iter=0, body step=echo_round).

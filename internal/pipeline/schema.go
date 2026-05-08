@@ -736,6 +736,14 @@ func (o OnFailureSpec) IsZero() bool {
 // expression resolved at execution time. Used for fields like
 // `max_iterations:` where pipelines pass `${defaults.hard_caps.foo}` so the
 // limit is configurable per-run.
+//
+// Note (bd-wapme): the zero value `IntOrExpr{}` is intentionally
+// indistinguishable from an explicitly authored `max_rounds: 0` literal,
+// so callers cannot reject literal 0 without breaking the omitted-field
+// default. Resolvers that consumed expression-resolved 0 as an error must
+// either treat literal 0 the same way (impossible without a presence
+// flag) or treat both as the single-round default. resolveForeachMaxRounds
+// chose the latter.
 type IntOrExpr struct {
 	Value int
 	Expr  string
@@ -1116,7 +1124,7 @@ type ForeachConfig struct {
 	Pairs          string                 `yaml:"pairs,omitempty" toml:"pairs,omitempty" json:"pairs,omitempty"`                // Convenience: iterate paired items produced by a generator command (e.g., debate-pair generation). Mutually exclusive with Items/Beads.
 	Debates        string                 `yaml:"debates,omitempty" toml:"debates,omitempty" json:"debates,omitempty"`          // Convenience: iterate DEBATE-* beads (typically scoped by state).
 	Models         StringOrList           `yaml:"models,omitempty" toml:"models,omitempty" json:"models,omitempty"`             // Convenience: iterate distinct model families in the roster. Accepts either an inline list (`["cc", "cod"]`) or a single shell command that emits one family per line.
-	MaxRounds      IntOrExpr              `yaml:"max_rounds,omitempty" toml:"max_rounds,omitempty" json:"max_rounds,omitempty"` // Per-iteration round cap for orchestration patterns that internally iterate (e.g., debate rounds).
+	MaxRounds      IntOrExpr              `yaml:"max_rounds,omitempty" toml:"max_rounds,omitempty" json:"max_rounds,omitempty"` // Per-iteration round cap for orchestration patterns that internally iterate (e.g., debate rounds). Omitting the field, setting it to a literal `0`, or providing an expression that resolves to a non-positive integer all default to a single round (bd-wapme); literal positive integers run that many rounds; expressions resolving above limits.max_foreach_rounds (default 100) are clamped with a Warn.
 	Filter         string                 `yaml:"filter,omitempty" toml:"filter,omitempty" json:"filter,omitempty"`             // Convenience predicate over the resolved iteration set, e.g. `role==proposer` or `state==active`. Applied after Items/Beads expansion.
 	PaneStrategy   string                 `yaml:"pane_assignment_strategy,omitempty" toml:"pane_assignment_strategy,omitempty" json:"pane_assignment_strategy,omitempty"`
 	Template       string                 `yaml:"template,omitempty" toml:"template,omitempty" json:"template,omitempty"`
