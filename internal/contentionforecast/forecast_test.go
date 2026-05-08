@@ -153,23 +153,85 @@ func TestCompute_DecayDisabledKeepsAllSamplesAtFullWeight(t *testing.T) {
 	t.Parallel()
 	now := clock()
 	in := Inputs{
-		Now:           now,
-		DecayHalfLife: -1, // <=0 disables in decayWeight; let's pass an explicit zero
+		Now: now,
 		Reservations: []ReservationEpisode{
 			{PathPattern: "internal/x/**", AgentName: "A", AcquiredAt: now.Add(-100 * 24 * time.Hour), Conflicted: true},
 			{PathPattern: "internal/x/**", AgentName: "A", AcquiredAt: now.Add(-2 * time.Hour), Conflicted: true},
 		},
 	}
-	// DecayHalfLife <=0 disables decay per implementation; we use -1 to be explicit.
+	// Zero selects the documented default (14d half-life); negative is
+	// the documented "disable decay" sentinel.
 	in.DecayHalfLife = 0
 	defaultRun := Compute(in).Hotspots[0]
-	in.DecayHalfLife = 1<<62 // effectively no decay (very long half-life)
+	in.DecayHalfLife = -1
 	noDecayRun := Compute(in).Hotspots[0]
-	// With near-no-decay the second run should not score lower than
-	// default (which uses 14d half-life and penalizes the 100d sample).
+	// With decay disabled the run should score >= the default (which
+	// uses 14d half-life and penalizes the 100d-old sample).
 	if noDecayRun.Score < defaultRun.Score {
-		t.Errorf("noDecay.Score=%v default.Score=%v; near-no-decay should score ≥ default",
+		t.Errorf("noDecay.Score=%v default.Score=%v; decay-disabled should score ≥ default",
 			noDecayRun.Score, defaultRun.Score)
+	}
+}
+
+// bd-iwqvb: pin the documented sentinel contract on Inputs.DecayHalfLife.
+// Zero must select the 14-day default; negative must disable decay so
+// every event lands at full weight regardless of age.
+func TestCompute_DecayHalfLifeSentinelContract(t *testing.T) {
+	t.Parallel()
+	now := clock()
+	old := now.Add(-365 * 24 * time.Hour) // a year stale
+	rec := now.Add(-1 * time.Hour)        // an hour fresh
+
+	makeInputs := func(half time.Duration) Inputs {
+		return Inputs{
+			Now:           now,
+			DecayHalfLife: half,
+			Reservations: []ReservationEpisode{
+				{PathPattern: "internal/x/**", AgentName: "A", AcquiredAt: old, Conflicted: true},
+				{PathPattern: "internal/x/**", AgentName: "A", AcquiredAt: rec, Conflicted: true},
+			},
+		}
+	}
+
+	zero := Compute(makeInputs(0))
+	def := Compute(makeInputs(DefaultDecayHalfLife))
+	if len(zero.Hotspots) == 0 || len(def.Hotspots) == 0 {
+		t.Fatalf("expected hotspots from both runs; zero=%d default=%d", len(zero.Hotspots), len(def.Hotspots))
+	}
+	// Zero MUST be byte-equal to passing DefaultDecayHalfLife — that
+	// is the documented sentinel.
+	if zero.Hotspots[0].Score != def.Hotspots[0].Score {
+		t.Errorf("DecayHalfLife=0 score=%v != DefaultDecayHalfLife score=%v; zero must select the default",
+			zero.Hotspots[0].Score, def.Hotspots[0].Score)
+	}
+
+	// Negative MUST disable decay — every weight is 1, so the year-old
+	// reservation contributes the same as the hour-old one. Frequency
+	// factor reaches squash01(2) ≈ 0.667. Default with 14d half-life
+	// would weight the year-old at ≈ 1e-8, giving frequency ≈ squash01(1)
+	// ≈ 0.5. Concretely: disabled frequency > default frequency.
+	disabled := Compute(makeInputs(-1 * time.Hour))
+	if len(disabled.Hotspots) == 0 {
+		t.Fatalf("expected hotspots when decay disabled; got 0")
+	}
+	if disabled.Hotspots[0].Factors["frequency"] <= def.Hotspots[0].Factors["frequency"] {
+		t.Errorf("disabled.frequency=%v default.frequency=%v; disabled must outweigh stale-decay",
+			disabled.Hotspots[0].Factors["frequency"], def.Hotspots[0].Factors["frequency"])
+	}
+}
+
+// bd-iwqvb: lower-level decayWeight contract — negative half-life
+// returns 1 for any age; zero is also coerced to "disabled" so direct
+// callers of the helper see the same semantics as the high-level
+// Inputs sentinel handling describes for negative durations.
+func TestDecayWeight_NonPositiveHalfLifeReturnsFullWeight(t *testing.T) {
+	t.Parallel()
+	for _, half := range []time.Duration{-1, 0, -24 * time.Hour} {
+		for _, age := range []time.Duration{0, time.Hour, 365 * 24 * time.Hour} {
+			if got := decayWeight(age, half); got != 1 {
+				t.Errorf("decayWeight(age=%v, half=%v) = %v, want 1", age, half, got)
+			}
+		}
 	}
 }
 

@@ -60,9 +60,18 @@ type Inputs struct {
 	TouchedPaths  []TouchedPath
 	BeadLabels    map[string][]string
 
-	// DecayHalfLife controls how fast historical signals lose
-	// weight. Defaults to 14 days. A value of zero disables decay
-	// (every event counts at full weight, regardless of age).
+	// DecayHalfLife controls how fast historical signals lose weight.
+	// Sentinel handling:
+	//   - zero          → use DefaultDecayHalfLife (14 days)
+	//   - negative      → disable decay entirely (every event counts at
+	//                     full weight, regardless of age)
+	//   - positive      → use that duration as the half-life
+	//
+	// Use a small negative sentinel like -1 to ask for "no decay";
+	// passing a literal 0 selects the default and is intentionally not
+	// the same as "disabled" so callers that leave the field unset get
+	// the recommended decay shape rather than accidentally turning the
+	// forecast into an unweighted historical sum.
 	DecayHalfLife time.Duration
 
 	// Now lets tests pin the wall clock.
@@ -294,8 +303,11 @@ func Compute(in Inputs) Forecast {
 }
 
 // decayWeight returns 1 for events at age 0, 0.5 at one half-life,
-// 0.25 at two half-lives, etc. A zero or negative half-life disables
-// decay (always returns 1).
+// 0.25 at two half-lives, etc. A negative half-life disables decay
+// (always returns 1). A zero half-life is unreachable from Compute
+// (which substitutes DefaultDecayHalfLife) but is also treated as
+// "disabled" here so direct callers of decayWeight see consistent
+// behavior with the public Inputs.DecayHalfLife semantics.
 func decayWeight(age, halfLife time.Duration) float64 {
 	if halfLife <= 0 {
 		return 1
