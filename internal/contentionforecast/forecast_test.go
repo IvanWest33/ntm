@@ -220,6 +220,39 @@ func TestCompute_DecayHalfLifeSentinelContract(t *testing.T) {
 	}
 }
 
+// bd-397fv: patternCoversPath was missing the bare "**" catch-all
+// branch — broadGlobPenalty already recognized it as the maximally-
+// broad shape, but patternCoversPath silently returned false for any
+// path, undercounting label/git activity for catch-all reservations.
+// Mirror of bd-6286k in reservationsim.
+func TestPatternCoversPath_CatchAllAndBoundaries(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		pattern, path string
+		want          bool
+	}{
+		// Catch-all patterns: previously returned false for "**".
+		{"**", "internal/foo.go", true},
+		{"**", "deep/nested/file.go", true},
+		{"**", "anyfile.go", true},
+		{"/**", "internal/foo.go", true}, // already worked; pin it
+		// Existing happy-path cases.
+		{"internal/auth/**", "internal/auth/session.go", true},
+		{"internal/auth/**", "internal/auth", true}, // exact-prefix match
+		{"internal/auth/*", "internal/auth/session.go", true},
+		{"internal/auth/session.go", "internal/auth/session.go", true},
+		// Negative cases that must stay negative.
+		{"internal/auth/**", "internal/billing/x.go", false},
+		{"internal/auth/*", "internal/auth/sub/x.go", false}, // /* is one segment
+		{"", "x.go", false},                                  // empty pattern
+	}
+	for _, c := range cases {
+		if got := patternCoversPath(c.pattern, c.path); got != c.want {
+			t.Errorf("patternCoversPath(%q, %q) = %v, want %v", c.pattern, c.path, got, c.want)
+		}
+	}
+}
+
 // bd-iwqvb: lower-level decayWeight contract — negative half-life
 // returns 1 for any age; zero is also coerced to "disabled" so direct
 // callers of the helper see the same semantics as the high-level

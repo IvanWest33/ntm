@@ -462,6 +462,15 @@ func patternCoversPath(pattern, path string) bool {
 	if p == path {
 		return true
 	}
+	// bd-397fv: bare "**" is a catch-all just like "/**".
+	// strings.HasSuffix("**", "/**") returns false (candidate is shorter
+	// than the suffix), so a bare "**" reservation pattern would fall
+	// through every branch and never match anything — even though
+	// broadGlobPenalty already recognizes it as the maximally-broad
+	// shape. Mirror of bd-6286k in reservationsim.
+	if p == "**" {
+		return true
+	}
 	if strings.HasSuffix(p, "/**") {
 		prefix := strings.TrimSuffix(p, "/**")
 		if prefix == "" {
