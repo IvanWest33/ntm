@@ -599,6 +599,60 @@ func TestForeachMaxRounds_ResumeSkipsAlreadyCompletedRounds(t *testing.T) {
 	}
 }
 
+// TestForeachMaxRounds_BranchPredicateResolvesRoundOverlay covers
+// bd-lwb25 site 1: a `branch:` predicate nested inside a foreach
+// max_rounds body must see the round overlay carried on ctx by
+// withRoundOverrides. resolveBranch previously called the non-ctx
+// substituteVariables, so the substitution fell back to the (post-
+// bd-2ubxp.20 unpopulated) state.Variables["round"] and the predicate
+// resolved to a literal `round_${round}` string that matched only the
+// "default" branches entry.
+//
+// Test shape: max_rounds=3 outer foreach with a branch step using
+// `branch: "round_${round}"` and three branches keyed round_1, round_2,
+// round_3. With the bd-lwb25 fix the right branch fires per round; no
+// recorded step result surfaces a "round not set" or branch-default
+// fallthrough error.
+func TestForeachMaxRounds_BranchPredicateResolvesRoundOverlay(t *testing.T) {
+	cfg := DefaultExecutorConfig("max-rounds-branch")
+	cfg.ProjectDir = t.TempDir()
+	executor := NewExecutor(cfg)
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "max-rounds-branch-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{{
+			ID: "fanout",
+			Foreach: &ForeachConfig{
+				Items:     `["only"]`,
+				As:        "item",
+				MaxRounds: IntOrExpr{Value: 3},
+				Steps: []Step{{
+					ID:     "route",
+					Branch: "round_${round}",
+					Branches: map[string]interface{}{
+						"round_1": map[string]interface{}{"id": "r1", "command": "true"},
+						"round_2": map[string]interface{}{"id": "r2", "command": "true"},
+						"round_3": map[string]interface{}{"id": "r3", "command": "true"},
+					},
+				}},
+			},
+		}},
+	}
+
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+
+	for id, sr := range state.Steps {
+		if sr.Error != nil && strings.Contains(sr.Error.Message, "round not set") {
+			t.Fatalf("state.Steps[%q] surfaced %q — bd-lwb25 fix did not thread ctx through resolveBranch", id, sr.Error.Message)
+		}
+	}
+}
+
 // TestForeachMaxRounds_FreshRunRecordsRoundWatermark covers the other
 // side of bd-r2pan: a fresh foreach run with max_rounds > 1 must record
 // the round watermark per iteration so a subsequent resume can detect

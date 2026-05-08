@@ -16,9 +16,12 @@ import (
 //   - Literal: "fresh-pass" → returns "fresh-pass"
 //   - Shell expression: "$(cmd)" → executes cmd, returns trimmed stdout
 //
-// Variable substitution is applied before evaluation.
+// Variable substitution is applied before evaluation. bd-lwb25: ctx-aware
+// so a `branch:` predicate nested inside a foreach max_rounds body sees
+// the round overlay from withRoundOverrides instead of falling back to
+// the (post-bd-2ubxp.20 unpopulated) state.Variables["round"].
 func (e *Executor) resolveBranch(ctx context.Context, step *Step) (string, error) {
-	expr := e.substituteVariables(step.Branch)
+	expr := e.substituteVariablesCtx(ctx, step.Branch)
 
 	if strings.HasPrefix(expr, "$(") && strings.HasSuffix(expr, ")") {
 		shellCmd := expr[2 : len(expr)-1]
@@ -254,7 +257,7 @@ func (e *Executor) executeOnFailureRecovery(ctx context.Context, step *Step, wor
 		return failed
 	}
 
-	recoveryStep, suppressFailure, err := e.recoveryStepFromFallback(step)
+	recoveryStep, suppressFailure, err := e.recoveryStepFromFallback(ctx, step)
 	if err != nil {
 		return e.recordRecoveryFailure(failed, step.ID, err)
 	}
@@ -512,27 +515,34 @@ func knownFailureAction(action string) bool {
 	}
 }
 
-func (e *Executor) recoveryStepFromFallback(step *Step) (*Step, bool, error) {
+// recoveryStepFromFallback constructs a synthetic recovery template step
+// from the on_failure.fallback config. bd-lwb25: ctx is threaded through
+// every substituteVariables call so a recovery template / pane / wait /
+// param value referencing ${round} (or any round-overlay binding) on a
+// step nested inside a foreach max_rounds body resolves against the
+// per-iteration overlay instead of falling back to the unpopulated
+// state.Variables["round"].
+func (e *Executor) recoveryStepFromFallback(ctx context.Context, step *Step) (*Step, bool, error) {
 	fallback := step.OnFailure.Fallback
 	template, ok := recoveryStringValue(fallback["template"])
 	if !ok || strings.TrimSpace(template) == "" {
 		return nil, false, fmt.Errorf("on_failure recovery requires non-empty template")
 	}
-	template = e.substituteVariables(template)
+	template = e.substituteVariablesCtx(ctx, template)
 
-	pane, err := e.recoveryPaneSpec(fallback["pane"])
+	pane, err := e.recoveryPaneSpec(ctx, fallback["pane"])
 	if err != nil {
 		return nil, false, err
 	}
 
-	params, err := e.recoveryParams(fallback["params"])
+	params, err := e.recoveryParams(ctx, fallback["params"])
 	if err != nil {
 		return nil, false, err
 	}
 
 	wait := WaitNone
 	if rawWait, ok := recoveryStringValue(fallback["wait"]); ok && strings.TrimSpace(rawWait) != "" {
-		wait = WaitCondition(e.substituteVariables(rawWait))
+		wait = WaitCondition(e.substituteVariablesCtx(ctx, rawWait))
 	}
 
 	return &Step{
@@ -545,7 +555,7 @@ func (e *Executor) recoveryStepFromFallback(step *Step) (*Step, bool, error) {
 	}, recoveryBoolValue(fallback["suppress_failure"]), nil
 }
 
-func (e *Executor) recoveryPaneSpec(raw interface{}) (PaneSpec, error) {
+func (e *Executor) recoveryPaneSpec(ctx context.Context, raw interface{}) (PaneSpec, error) {
 	switch v := raw.(type) {
 	case int:
 		if v > 0 {
@@ -565,7 +575,7 @@ func (e *Executor) recoveryPaneSpec(raw interface{}) (PaneSpec, error) {
 			return PaneSpec{Index: int(n)}, nil
 		}
 	case string:
-		resolved := strings.TrimSpace(e.substituteVariables(v))
+		resolved := strings.TrimSpace(e.substituteVariablesCtx(ctx, v))
 		n, err := strconv.Atoi(resolved)
 		if err == nil && n > 0 {
 			return PaneSpec{Index: n}, nil
@@ -575,7 +585,7 @@ func (e *Executor) recoveryPaneSpec(raw interface{}) (PaneSpec, error) {
 	return PaneSpec{}, fmt.Errorf("on_failure recovery requires positive pane index")
 }
 
-func (e *Executor) recoveryParams(raw interface{}) (map[string]interface{}, error) {
+func (e *Executor) recoveryParams(ctx context.Context, raw interface{}) (map[string]interface{}, error) {
 	if raw == nil {
 		return nil, nil
 	}
@@ -592,25 +602,25 @@ func (e *Executor) recoveryParams(raw interface{}) (map[string]interface{}, erro
 
 	resolved := make(map[string]interface{}, len(params))
 	for key, val := range params {
-		resolved[key] = e.recoveryParamValue(val)
+		resolved[key] = e.recoveryParamValue(ctx, val)
 	}
 	return resolved, nil
 }
 
-func (e *Executor) recoveryParamValue(val interface{}) interface{} {
+func (e *Executor) recoveryParamValue(ctx context.Context, val interface{}) interface{} {
 	switch v := val.(type) {
 	case string:
-		return e.substituteVariables(v)
+		return e.substituteVariablesCtx(ctx, v)
 	case []interface{}:
 		out := make([]interface{}, len(v))
 		for i, item := range v {
-			out[i] = e.recoveryParamValue(item)
+			out[i] = e.recoveryParamValue(ctx, item)
 		}
 		return out
 	case map[string]interface{}:
 		out := make(map[string]interface{}, len(v))
 		for key, item := range v {
-			out[key] = e.recoveryParamValue(item)
+			out[key] = e.recoveryParamValue(ctx, item)
 		}
 		return out
 	default:

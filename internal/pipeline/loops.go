@@ -96,8 +96,10 @@ func (le *LoopExecutor) executeForEach(ctx context.Context, step *Step, loop *Lo
 		Collected: make([]interface{}, 0),
 	}
 
-	// Resolve items expression to get the array
-	items, err := le.resolveItems(loop.Items)
+	// Resolve items expression to get the array. bd-lwb25: pass ctx so a
+	// loop nested inside a foreach max_rounds body can resolve ${round}
+	// in its items expression (e.g. `${vars.batches_${round}}`).
+	items, err := le.resolveItems(ctx, loop.Items)
 	if err != nil {
 		result.Status = StatusFailed
 		result.Error = &StepError{
@@ -734,9 +736,15 @@ func loopControlAppliesForStep(ctx context.Context, step Step, e *Executor) (Loo
 }
 
 // resolveItems resolves an items expression to an array of values.
-func (le *LoopExecutor) resolveItems(expr string) ([]interface{}, error) {
-	// Substitute variables in the expression
-	resolved := le.executor.substituteVariables(expr)
+//
+// bd-lwb25: ctx-aware so a `loop.items` expression nested inside a foreach
+// max_rounds body sees the round overlay from withRoundOverrides. Both
+// the early substituteVariables and the manual NewSubstitutor downstream
+// pick up the round bindings via ctx, so `loop.items: ${vars.batches_${round}}`
+// resolves per-round.
+func (le *LoopExecutor) resolveItems(ctx context.Context, expr string) ([]interface{}, error) {
+	// Substitute variables in the expression (ctx so round overlay applies).
+	resolved := le.executor.substituteVariablesCtx(ctx, expr)
 
 	// Check if it's a direct array in Variables
 	le.executor.varMu.RLock()
@@ -746,6 +754,9 @@ func (le *LoopExecutor) resolveItems(expr string) ([]interface{}, error) {
 	sub := NewSubstitutor(le.executor.state, le.executor.config.Session, le.executor.state.WorkflowID)
 	sub.SetDefaults(le.executor.defaults)
 	sub.SetMaxDepth(le.executor.limits.MaxSubstitutionDepth)
+	if overrides := roundOverridesFromCtx(ctx); overrides != nil {
+		sub.SetLocalOverrides(overrides)
+	}
 
 	// Strip ${ and } if present
 	varPath := resolved

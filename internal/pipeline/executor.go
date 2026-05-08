@@ -2725,6 +2725,17 @@ func (e *Executor) substituteVariables(s string) string {
 	return result
 }
 
+// substituteVariablesCtx is the ctx-aware form of substituteVariables.
+// Errors are silently dropped (the non-strict contract) but ctx-carried
+// round overrides from withRoundOverrides are respected so a branch
+// predicate / loop.items expression / on_failure recovery field nested
+// inside a foreach max_rounds body can resolve ${round}/${loop.round}
+// against the per-iteration overlay (bd-lwb25).
+func (e *Executor) substituteVariablesCtx(ctx context.Context, s string) string {
+	result, _ := e.substituteVariablesStrictCtx(ctx, s)
+	return result
+}
+
 // substituteVariablesStrict runs the same substitution passes as
 // substituteVariables but propagates any unresolved-reference error (missing
 // env var, undefined ${vars.X}, recursion depth exceeded, etc.) to the caller.
