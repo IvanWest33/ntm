@@ -295,6 +295,37 @@ func TestIsWorkingOutputStructure(t *testing.T) {
 	}
 }
 
+// TestIsLiveBusyOverridesIdleVerdict_Codex verifies the predicate that drives
+// the #133 fix: when a Codex pane shows live "Working …" + "esc to interrupt"
+// chrome, IsLiveBusy must say true so that GetIsWorking forces IsWorking=true,
+// IsIdle=false, and Recommendation=DO_NOT_INTERRUPT regardless of what the
+// legacy parser concluded. Without this, the same scrollback that
+// --robot-activity classifies as THINKING was being marked SAFE_TO_RESTART.
+func TestIsLiveBusyOverridesIdleVerdict_Codex(t *testing.T) {
+	scrollback := `> previous user prompt
+
+• Working (4m 51s • esc to interrupt)
+  Reading src/main.rs
+
+`
+	if !IsLiveBusy(scrollback, agent.AgentTypeCodex.String()) {
+		t.Fatalf("IsLiveBusy(<codex working scrollback>, %q) = false, expected true; the live-window override would not fire and SAFE_TO_RESTART would leak through", agent.AgentTypeCodex.String())
+	}
+
+	// Idle pane (no thinking chrome in the live window) should not trigger
+	// the override — otherwise we would falsely lock every pane into
+	// DO_NOT_INTERRUPT after a single ambient match.
+	idleScrollback := `> previous user prompt
+
+  Done.
+
+codex>
+`
+	if IsLiveBusy(idleScrollback, agent.AgentTypeCodex.String()) {
+		t.Fatalf("IsLiveBusy(<idle codex prompt>, %q) = true, expected false; this would lock idle panes into DO_NOT_INTERRUPT", agent.AgentTypeCodex.String())
+	}
+}
+
 // Helper function for substring matching
 func containsSubstring(s, substr string) bool {
 	return len(s) >= len(substr) && hasSubstr(s, substr)

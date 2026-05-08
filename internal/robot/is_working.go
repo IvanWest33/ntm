@@ -283,6 +283,24 @@ func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
 			RecommendationReason: getRecommendationReason(state),
 		}
 
+		// Live-window THINKING override (#133). The legacy parser can mark a
+		// pane idle when its prompt-pattern view does not see in-flight work
+		// driven by another orchestrator, but `--robot-activity` would still
+		// classify the same scrollback as THINKING from the trailing live
+		// window. Without this override, --robot-is-working and downstream
+		// --robot-agent-health (which reads our IsWorking) recommend
+		// SAFE_TO_RESTART for a Codex pane that is actually mid-tool-call.
+		// `internal/cli/assign.go::determineAgentState` already applies the
+		// same override before dispatch; this brings the restart/health
+		// surfaces into agreement with --robot-activity / IsLiveBusy.
+		if IsLiveBusy(content, paneHints[paneIdx].String()) {
+			status.IsWorking = true
+			status.IsIdle = false
+			status.Recommendation = string(agent.RecommendDoNotInterrupt)
+			status.RecommendationReason = "Live-window thinking patterns detected (matches --robot-activity THINKING)"
+			status.Indicators.Work = append(status.Indicators.Work, "live_window_thinking")
+		}
+
 		// Ensure indicators are never nil
 		if status.Indicators.Work == nil {
 			status.Indicators.Work = []string{}
@@ -297,21 +315,22 @@ func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
 
 		output.Panes[paneKey] = status
 
-		// Update summary
-		if state.IsWorking {
+		// Update summary using overridden values so the live-window override
+		// is reflected in fleet-level counts and the recommendation buckets.
+		if status.IsWorking {
 			output.Summary.WorkingCount++
 		}
-		if state.IsIdle {
+		if status.IsIdle {
 			output.Summary.IdleCount++
 		}
-		if state.IsRateLimited {
+		if status.IsRateLimited {
 			output.Summary.RateLimitedCount++
 		}
-		if state.IsContextLow {
+		if status.IsContextLow {
 			output.Summary.ContextLowCount++
 		}
 
-		rec := string(state.GetRecommendation())
+		rec := status.Recommendation
 		if output.Summary.ByRecommendation[rec] == nil {
 			output.Summary.ByRecommendation[rec] = []int{}
 		}
