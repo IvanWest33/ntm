@@ -79,6 +79,52 @@ func TestCompare_PresentOnTUIMissingOnRobotIsCritical(t *testing.T) {
 	}
 }
 
+func TestCompare_DuplicateKindIDIsCritical(t *testing.T) {
+	t.Parallel()
+	in := twin()
+	in.Robot = append(in.Robot, SnapshotView{
+		Kind: "pane", ID: "%17", Name: "duplicate pane", Status: "stale", AgentType: "gmi", PaneIndex: 99,
+	})
+	r := Compare(in)
+	found := false
+	for _, d := range r.Drifts {
+		if d.ID == "%17" && d.Field == "duplicate_id" && d.Severity == SeverityCritical {
+			if d.Robot != "duplicate_id" || d.TUI != "" {
+				t.Errorf("duplicate drift surface markers = robot=%q tui=%q, want robot-only", d.Robot, d.TUI)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("missing duplicate_id drift for %%17: %+v", r.Drifts)
+	}
+}
+
+func TestCompare_MalformedIdentityFieldsAreInfoDrifts(t *testing.T) {
+	t.Parallel()
+	r := Compare(Inputs{
+		Now: clock(),
+		Robot: []SnapshotView{
+			{Kind: "session", Name: "missing id"},
+			{ID: "%17", Name: "missing kind"},
+		},
+	})
+	if r.Counts.Info != 2 {
+		t.Fatalf("Info count = %d, want 2: %+v", r.Counts.Info, r.Drifts)
+	}
+	if !hasDrift(r.Drifts, "missing_id", SeverityInfo) {
+		t.Errorf("missing missing_id info drift: %+v", r.Drifts)
+	}
+	if !hasDrift(r.Drifts, "missing_kind", SeverityInfo) {
+		t.Errorf("missing missing_kind info drift: %+v", r.Drifts)
+	}
+	for _, d := range r.Drifts {
+		if d.Field == "presence" {
+			t.Errorf("malformed identity should not become presence drift: %+v", d)
+		}
+	}
+}
+
 func TestCompare_StatusDisagreementIsWarning(t *testing.T) {
 	t.Parallel()
 	in := twin()
@@ -207,9 +253,9 @@ func TestCompare_IgnoredFieldsSuppressDrift(t *testing.T) {
 func TestCompare_DriftsSortedCriticalFirstThenStable(t *testing.T) {
 	t.Parallel()
 	in := twin()
-	in.TUI = in.TUI[:2]              // drop %18 -> critical drift
-	in.TUI[1].Status = "stuck"       // status drift on %17 -> warning
-	in.TUI[1].Name = "new label"     // name drift on %17 -> info
+	in.TUI = in.TUI[:2]          // drop %18 -> critical drift
+	in.TUI[1].Status = "stuck"   // status drift on %17 -> warning
+	in.TUI[1].Name = "new label" // name drift on %17 -> info
 	r := Compare(in)
 	if len(r.Drifts) < 2 {
 		t.Fatalf("expected multiple drifts, got %d", len(r.Drifts))
@@ -255,4 +301,13 @@ func TestCompare_EmptyInputsHaveNoDrift(t *testing.T) {
 	if len(r.Drifts) != 0 {
 		t.Errorf("Drifts = %+v, want none on empty inputs", r.Drifts)
 	}
+}
+
+func hasDrift(drifts []Drift, field string, severity Severity) bool {
+	for _, d := range drifts {
+		if d.Field == field && d.Severity == severity {
+			return true
+		}
+	}
+	return false
 }

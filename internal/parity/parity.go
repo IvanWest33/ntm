@@ -92,12 +92,12 @@ type Drift struct {
 
 // Report is the full parity assessment.
 type Report struct {
-	GeneratedAt    time.Time `json:"generated_at"`
-	RobotCount     int       `json:"robot_count"`
-	TUICount       int       `json:"tui_count"`
-	Drifts         []Drift   `json:"drifts,omitempty"`
-	Counts         Counts    `json:"counts"`
-	Summary        string    `json:"summary"`
+	GeneratedAt time.Time `json:"generated_at"`
+	RobotCount  int       `json:"robot_count"`
+	TUICount    int       `json:"tui_count"`
+	Drifts      []Drift   `json:"drifts,omitempty"`
+	Counts      Counts    `json:"counts"`
+	Summary     string    `json:"summary"`
 }
 
 // Counts breaks the drift list down by severity for dashboard rollup.
@@ -124,8 +124,10 @@ func Compare(in Inputs) Report {
 		TUICount:    len(in.TUI),
 	}
 
-	robotMap := indexByKindID(in.Robot)
-	tuiMap := indexByKindID(in.TUI)
+	robotMap, robotIndexDrifts := indexByKindID("robot", in.Robot)
+	tuiMap, tuiIndexDrifts := indexByKindID("tui", in.TUI)
+	report.Drifts = append(report.Drifts, robotIndexDrifts...)
+	report.Drifts = append(report.Drifts, tuiIndexDrifts...)
 
 	allKeys := make(map[string]struct{})
 	for k := range robotMap {
@@ -192,16 +194,48 @@ func Compare(in Inputs) Report {
 	return report
 }
 
-func indexByKindID(views []SnapshotView) map[string]SnapshotView {
+func indexByKindID(surface string, views []SnapshotView) (map[string]SnapshotView, []Drift) {
 	out := make(map[string]SnapshotView, len(views))
+	var drifts []Drift
 	for _, v := range views {
-		k := strings.TrimSpace(v.Kind) + ":" + strings.TrimSpace(v.ID)
-		if k == ":" {
+		kind := strings.TrimSpace(v.Kind)
+		id := strings.TrimSpace(v.ID)
+		normalized := v
+		normalized.Kind = kind
+		normalized.ID = id
+		if kind == "" {
+			drifts = append(drifts, surfaceDrift(surface, normalized, "missing_kind", SeverityInfo, "view missing Kind on "+surface))
 			continue
 		}
-		out[k] = v
+		if id == "" {
+			drifts = append(drifts, surfaceDrift(surface, normalized, "missing_id", SeverityInfo, "view missing ID on "+surface))
+			continue
+		}
+		k := kind + ":" + id
+		if _, exists := out[k]; exists {
+			drifts = append(drifts, surfaceDrift(surface, normalized, "duplicate_id", SeverityCritical, "two "+surface+" views share the same Kind:ID"))
+			continue
+		}
+		out[k] = normalized
 	}
-	return out
+	return out, drifts
+}
+
+func surfaceDrift(surface string, v SnapshotView, field string, severity Severity, detail string) Drift {
+	d := Drift{
+		Kind:     v.Kind,
+		ID:       v.ID,
+		Field:    field,
+		Severity: severity,
+		Detail:   detail,
+	}
+	switch surface {
+	case "robot":
+		d.Robot = field
+	case "tui":
+		d.TUI = field
+	}
+	return d
 }
 
 // compareViews returns drifts for one pair of present-on-both views.
