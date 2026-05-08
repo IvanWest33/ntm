@@ -2303,6 +2303,17 @@ Shell Integration:
 			}
 			return
 		}
+		if robotSafetySimulate {
+			opts := robot.SafetySimulationOptions{
+				Command: robotDCGCmd,
+				Steps:   robotSafetySteps,
+			}
+			if err := robot.PrintSafetySimulation(opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 
 		// Robot-quota-status handler for caut quota status
 		if robotQuotaStatus {
@@ -3118,11 +3129,13 @@ var (
 	robotEnv string // --robot-env flag (session name or "global")
 
 	// Robot-dcg-status flag for DCG status
-	robotDCGStatus  bool   // --robot-dcg-status flag
-	robotDCGCheck   bool   // --robot-dcg-check / --robot-guard flag
-	robotDCGCmd     string // --command / --cmd flag (required with --robot-dcg-check / --robot-guard)
-	robotDCGContext string // --context flag (intent/context for the command)
-	robotDCGCwd     string // --cwd flag (working directory context)
+	robotDCGStatus      bool     // --robot-dcg-status flag
+	robotDCGCheck       bool     // --robot-dcg-check / --robot-guard flag
+	robotDCGCmd         string   // --command / --cmd flag (required with --robot-dcg-check / --robot-guard)
+	robotDCGContext     string   // --context flag (intent/context for the command)
+	robotDCGCwd         string   // --cwd flag (working directory context)
+	robotSafetySimulate bool     // --robot-safety-simulate flag
+	robotSafetySteps    []string // repeated --step values for --robot-safety-simulate
 
 	// Robot-slb flags for SLB approvals
 	robotSLBPending bool   // --robot-slb-pending flag
@@ -3652,6 +3665,8 @@ func init() {
 	rootCmd.Flags().StringVar(&robotDCGCmd, "cmd", "", "DEPRECATED: use --command")
 	rootCmd.Flags().StringVar(&robotDCGContext, "context", "", "Context/intent for the command (helps DCG make better decisions). Example: --context='Cleaning build artifacts'")
 	rootCmd.Flags().StringVar(&robotDCGCwd, "cwd", "", "Working directory context (defaults to current directory). Example: --cwd=/tmp/scratch")
+	rootCmd.Flags().BoolVar(&robotSafetySimulate, "robot-safety-simulate", false, "Simulate a safety policy command plan without execution. JSON output. Use --command and/or repeated --step.")
+	rootCmd.Flags().StringArrayVar(&robotSafetySteps, "step", nil, "Command step for --robot-safety-simulate; repeat for multi-step plans")
 
 	// Robot-slb flags for SLB approvals
 	rootCmd.Flags().BoolVar(&robotSLBPending, "robot-slb-pending", false, "List pending SLB approval requests. JSON output. Example: ntm --robot-slb-pending")

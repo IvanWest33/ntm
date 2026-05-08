@@ -132,7 +132,7 @@
     "xf_status"
   ],
   "section_count": 13,
-  "surface_count": 136,
+  "surface_count": 137,
   "surfaces": [
     {
       "category": "state",
@@ -2038,6 +2038,22 @@
       "name": "setup-status",
       "schema_id": "ntm:robot:setup-status:v1",
       "schema_type": "setup_status"
+    },
+    {
+      "category": "utility",
+      "flag": "--robot-safety-simulate",
+      "has_action_handoff": true,
+      "has_attention_ops": false,
+      "has_boundedness": false,
+      "has_consumer_guidance": true,
+      "has_explainability": true,
+      "has_follow_up": false,
+      "has_lifecycle": false,
+      "has_request_semantics": true,
+      "name": "safety-simulate",
+      "schema_id": "ntm:robot:safety-simulate:v1",
+      "schema_type": "",
+      "supports_idempotency": true
     },
     {
       "category": "utility",

@@ -146,3 +146,44 @@ exit 0
 		t.Fatalf("expected dcg verdict populated and blocked=true; got %+v", resp.DCG)
 	}
 }
+
+func TestSafetySimulationCommandsPreserveMalformedStep(t *testing.T) {
+	got := safetySimulationCommands("git status", []string{"git reset --hard HEAD~1", ""})
+	want := []string{"git status", "git reset --hard HEAD~1", ""}
+	if len(got) != len(want) {
+		t.Fatalf("commands = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("commands[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestEvaluateSafetySimulationReportsUnsafePlan(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	report, err := evaluateSafetySimulation([]string{
+		"git status",
+		"git reset --hard HEAD~1",
+		"git commit --amend",
+		"",
+	})
+	if err != nil {
+		t.Fatalf("evaluateSafetySimulation returned error: %v", err)
+	}
+
+	if report.SafeToRun {
+		t.Fatal("SafeToRun = true, want false")
+	}
+	if report.Summary.AllowedSteps != 1 || report.Summary.BlockedSteps != 1 ||
+		report.Summary.ApprovalSteps != 1 || report.Summary.InvalidSteps != 1 {
+		t.Fatalf("summary = %+v, want one allowed, blocked, approval, and invalid", report.Summary)
+	}
+	if len(report.Steps) != 4 {
+		t.Fatalf("steps = %d, want 4", len(report.Steps))
+	}
+	if len(report.Steps[1].SaferAlternatives) == 0 {
+		t.Fatalf("blocked step missing safer alternatives: %+v", report.Steps[1])
+	}
+}

@@ -1456,6 +1456,20 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Examples: []string{"ntm --robot-dcg-check --command='rm -rf /tmp'"},
 		},
 		{
+			Name:        "safety-simulate",
+			Flag:        "--robot-safety-simulate",
+			Category:    "utility",
+			Description: "Simulate a multi-step command plan against the NTM safety policy without executing any command.",
+			Parameters: []RobotParameter{
+				{Name: "command", Flag: "--command", Type: "string", Required: false, Description: "Single command to simulate"},
+				{Name: "step", Flag: "--step", Type: "string", Required: false, Description: "Command step to simulate; repeat for multi-step plans"},
+			},
+			Examples: []string{
+				"ntm --robot-safety-simulate --command='git reset --hard HEAD~1'",
+				"ntm --robot-safety-simulate --step='git status' --step='git reset --hard HEAD~1'",
+			},
+		},
+		{
 			Name:        "slb-pending",
 			Flag:        "--robot-slb-pending",
 			Category:    "utility",
@@ -1753,7 +1767,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Name:        "causality",
 			Flag:        "--robot-causality",
 			Category:    "utility",
-			Description: "Get unified causality timeline across audit, Agent Mail, and pipeline/session state.",
+			Description: "Get unified causality timeline across audit, Agent Mail, and pipeline/session state. Count semantics: total=post-dedupe pre-filter events, available=post-filter pre-limit events, filtered=returned events.",
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-causality", Type: "string", Required: true, Description: "Session name"},
 				{Name: "causality-project", Flag: "--causality-project", Type: "string", Required: false, Description: "Project path override for Agent Mail and pipeline state lookup"},

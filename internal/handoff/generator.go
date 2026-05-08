@@ -1166,10 +1166,3 @@ func buildCASSMemoryEntries(hits []cass.SearchHit, limit int) []string {
 
 	return out
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
