@@ -134,6 +134,80 @@ func TestAcquire_ExpiredLeaseIsReapedAndReclaimed(t *testing.T) {
 	}
 }
 
+// bd-zshpx: an unrelated stale lease that ages out during another
+// pattern's acquire MUST NOT promote that acquire to
+// OutcomeExpiredReclaimed. Only a reaped lease whose pattern
+// overlapped the new acquire's pattern justifies that outcome.
+func TestAcquire_UnrelatedStaleLeaseDoesNotPromoteToExpiredReclaimed(t *testing.T) {
+	t.Parallel()
+	clk := newClockAt(anchor())
+	sim := NewSimulator(clk)
+
+	// Stale lease in an UNRELATED namespace ("x/**"); the new acquire
+	// targets a disjoint namespace ("a/b/**").
+	sim.Acquire(AcquireRequest{
+		PathPattern: "x/**", AgentName: "Stale", Exclusive: true, TTL: 30 * time.Minute,
+	})
+	clk.Advance(31 * time.Minute) // x/** lease has expired
+
+	r := sim.Acquire(AcquireRequest{
+		PathPattern: "a/b/**", AgentName: "Fresh", Exclusive: true, TTL: time.Hour,
+	})
+	if r.Outcome != OutcomeAcquired {
+		t.Fatalf("Outcome = %s, want acquired (the reaped lease was unrelated to a/b/**)", r.Outcome)
+	}
+	if r.Lease == nil || r.Lease.AgentName != "Fresh" {
+		t.Errorf("Lease = %+v, want Fresh as new holder", r.Lease)
+	}
+	// And the reaper still ran — only one active lease should remain.
+	if active := sim.Active(); len(active) != 1 {
+		t.Errorf("Active = %d, want 1 (stale x/** reaped, fresh a/b/** alive)", len(active))
+	}
+}
+
+// Companion to the bd-zshpx fix: when a stale lease overlapping the
+// new acquire's pattern is reaped during the same call, the outcome
+// must still be OutcomeExpiredReclaimed (the pre-existing semantics
+// remain).
+func TestAcquire_OverlappingStaleLeaseStillPromotesToExpiredReclaimed(t *testing.T) {
+	t.Parallel()
+	clk := newClockAt(anchor())
+	sim := NewSimulator(clk)
+
+	sim.Acquire(AcquireRequest{
+		PathPattern: "internal/auth/**", AgentName: "A", Exclusive: true, TTL: 30 * time.Minute,
+	})
+	clk.Advance(31 * time.Minute)
+
+	// Different but OVERLAPPING pattern — patternsOverlap should agree
+	// because internal/auth/** covers internal/auth/session.go.
+	r := sim.Acquire(AcquireRequest{
+		PathPattern: "internal/auth/session.go", AgentName: "B", Exclusive: true, TTL: time.Hour,
+	})
+	if r.Outcome != OutcomeExpiredReclaimed {
+		t.Fatalf("Outcome = %s, want expired_reclaimed (overlap with reaped lease)", r.Outcome)
+	}
+}
+
+// Companion: when MULTIPLE stale leases age out during one acquire and
+// only ONE of them overlaps the request, the outcome must still be
+// expired_reclaimed (the overlap fired) and the unrelated reap must
+// not be required for that signal.
+func TestAcquire_OverlapAmongMultipleReapsTriggersExpiredReclaimed(t *testing.T) {
+	t.Parallel()
+	clk := newClockAt(anchor())
+	sim := NewSimulator(clk)
+
+	sim.Acquire(AcquireRequest{PathPattern: "x/**", AgentName: "X", Exclusive: true, TTL: 10 * time.Minute})
+	sim.Acquire(AcquireRequest{PathPattern: "y/**", AgentName: "Y", Exclusive: true, TTL: 10 * time.Minute})
+	clk.Advance(11 * time.Minute) // both leases expired
+
+	r := sim.Acquire(AcquireRequest{PathPattern: "x/**", AgentName: "Z", Exclusive: true, TTL: time.Hour})
+	if r.Outcome != OutcomeExpiredReclaimed {
+		t.Fatalf("Outcome = %s, want expired_reclaimed (x/** reaped overlapped the new x/** acquire)", r.Outcome)
+	}
+}
+
 func TestRelease_ByIDAndByAgent(t *testing.T) {
 	t.Parallel()
 	sim := NewSimulator(newClockAt(anchor()))

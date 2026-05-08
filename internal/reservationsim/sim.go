@@ -121,7 +121,12 @@ func (s *Simulator) Acquire(req AcquireRequest) AcquireResult {
 	}
 
 	now := s.clock.Now()
-	reaped := s.reapExpiredLocked(now)
+	// Pass the requested pattern so the reaper can report whether any
+	// of the leases it just removed actually overlapped it. The
+	// OutcomeExpiredReclaimed contract is "the requested pattern was
+	// previously held" — a reap of an unrelated stale lease must NOT
+	// promote a fresh acquire to that outcome (bd-zshpx).
+	reapedOverlap := s.reapExpiredLocked(now, pat)
 
 	// Look for live conflicts.
 	for _, l := range s.leases {
@@ -154,7 +159,7 @@ func (s *Simulator) Acquire(req AcquireRequest) AcquireResult {
 	}
 	s.leases = append(s.leases, lease)
 	out := OutcomeAcquired
-	if reaped {
+	if reapedOverlap {
 		out = OutcomeExpiredReclaimed
 	}
 	leaseCopy := *lease
@@ -203,7 +208,7 @@ func (s *Simulator) ReleaseByAgent(agent string) int {
 // slice is a copy; mutating it does not affect the simulator.
 func (s *Simulator) Active() []Lease {
 	now := s.clock.Now()
-	s.reapExpiredLocked(now)
+	s.reapExpiredLocked(now, "")
 	out := make([]Lease, len(s.leases))
 	for i, l := range s.leases {
 		out[i] = *l
@@ -233,7 +238,7 @@ type DiagnosticsReport struct {
 // say "this exact path is currently locked".
 func (s *Simulator) Diagnostics() DiagnosticsReport {
 	now := s.clock.Now()
-	s.reapExpiredLocked(now)
+	s.reapExpiredLocked(now, "")
 	rep := DiagnosticsReport{
 		GeneratedAt: now.UTC(),
 		Leases:      s.Active(),
@@ -251,23 +256,31 @@ func (s *Simulator) Diagnostics() DiagnosticsReport {
 }
 
 // reapExpiredLocked removes every lease whose ExpiresAt is before now.
-// Returns true when at least one lease was reaped, so Acquire can
-// distinguish OutcomeAcquired from OutcomeExpiredReclaimed.
-func (s *Simulator) reapExpiredLocked(now time.Time) bool {
+//
+// pat scopes the returned overlap boolean to a candidate pattern: when
+// non-empty, the bool is true only if at least one of the reaped
+// leases overlapped pat (per patternsOverlap). Acquire passes the
+// requesting pattern so its OutcomeExpiredReclaimed signal honors the
+// "the requested pattern was previously held" contract (bd-zshpx).
+// Active / Diagnostics pass "" because they only need the side effect.
+func (s *Simulator) reapExpiredLocked(now time.Time, pat string) bool {
 	if len(s.leases) == 0 {
 		return false
 	}
+	pat = strings.TrimSpace(pat)
 	kept := s.leases[:0]
-	reaped := false
+	overlap := false
 	for _, l := range s.leases {
 		if !l.ExpiresAt.IsZero() && !now.Before(l.ExpiresAt) {
-			reaped = true
+			if pat != "" && patternsOverlap(l.PathPattern, pat) {
+				overlap = true
+			}
 			continue
 		}
 		kept = append(kept, l)
 	}
 	s.leases = kept
-	return reaped
+	return overlap
 }
 
 // otherSharedHolder returns the first existing shared lease that
