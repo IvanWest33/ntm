@@ -1013,6 +1013,12 @@ var queueDryCollectOptional = func(ctx context.Context, snapshot *ideaplan.IdeaE
 	ideaplan.Collector{}.CollectOptional(ctx, snapshot, opts)
 }
 
+var queueDryNewAgentMailClient = func(projectDir string) *agentmail.Client {
+	return newAgentMailClient(projectDir)
+}
+
+var queueDryFetchActiveReservations = fetchActiveReservations
+
 func runWorkCommitReady(format string, agentName string, syncLagMinutes int) error {
 	dir, err := os.Getwd()
 	if err != nil {
@@ -1759,18 +1765,12 @@ func evaluateQueueDrySync(projectDir string, lagThreshold time.Duration) QueueDr
 }
 
 func collectQueueDryReservations(projectDir string) QueueDryReservations {
-	client := newAgentMailClient(projectDir)
-	if !client.IsAvailable() {
-		return QueueDryReservations{
-			Available: false,
-			Error:     "Agent Mail server unavailable",
-		}
-	}
+	client := queueDryNewAgentMailClient(projectDir)
 
 	ctx, cancel := context.WithTimeout(context.Background(), queueDryReservationTimeout)
 	defer cancel()
 
-	reservations, err := fetchActiveReservations(ctx, client, projectDir, "", true)
+	reservations, err := queueDryFetchActiveReservations(ctx, client, projectDir, "", true)
 	if err != nil {
 		return QueueDryReservations{
 			Available: false,

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/commitlint"
 	ideaplan "github.com/Dicklesworthstone/ntm/internal/ideation"
@@ -265,6 +266,50 @@ func TestQueueDryReservationTimeoutIsInteractive(t *testing.T) {
 	}
 	if queueDryReservationTimeout >= 5*time.Second {
 		t.Fatalf("queueDryReservationTimeout = %s, must be < 5s for an interactive diagnostic", queueDryReservationTimeout)
+	}
+}
+
+func TestCollectQueueDryReservationsSkipsHealthPreflight(t *testing.T) {
+	oldNewClient := queueDryNewAgentMailClient
+	oldFetchReservations := queueDryFetchActiveReservations
+	t.Cleanup(func() {
+		queueDryNewAgentMailClient = oldNewClient
+		queueDryFetchActiveReservations = oldFetchReservations
+	})
+
+	queueDryNewAgentMailClient = func(projectDir string) *agentmail.Client {
+		if projectDir != "/repo" {
+			t.Fatalf("projectDir=%q, want /repo", projectDir)
+		}
+		// If collectQueueDryReservations regresses to a health preflight,
+		// this deliberately unreachable endpoint makes the test fail before
+		// the reservation fetch seam can return a valid read-side snapshot.
+		return agentmail.NewClient(agentmail.WithBaseURL("http://127.0.0.1:1/"))
+	}
+
+	fetchCalled := false
+	queueDryFetchActiveReservations = func(ctx context.Context, client *agentmail.Client, projectKey, agentName string, allAgents bool) ([]agentmail.FileReservation, error) {
+		fetchCalled = true
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("reservation lookup should have a deadline")
+		}
+		if projectKey != "/repo" || agentName != "" || !allAgents {
+			t.Fatalf("lookup args project=%q agent=%q allAgents=%v", projectKey, agentName, allAgents)
+		}
+		return []agentmail.FileReservation{
+			{ID: 42, AgentName: "BlueLake", PathPattern: "internal/cli/work.go"},
+		}, nil
+	}
+
+	got := collectQueueDryReservations("/repo")
+	if !fetchCalled {
+		t.Fatal("reservation fetch was not called")
+	}
+	if !got.Available || got.Count != 1 {
+		t.Fatalf("reservations=%+v, want one available reservation", got)
+	}
+	if len(got.Holders) != 1 || got.Holders[0] != "BlueLake" {
+		t.Fatalf("holders=%v, want [BlueLake]", got.Holders)
 	}
 }
 
