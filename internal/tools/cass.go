@@ -100,7 +100,7 @@ func (a *CASSAdapter) Health(ctx context.Context) (*HealthStatus, error) {
 	// fatal.
 	type cassHealth struct {
 		Status            string   `json:"status"`
-		Healthy           bool     `json:"healthy"`
+		Healthy           *bool    `json:"healthy"`
 		Initialized       *bool    `json:"initialized"`
 		Errors            []string `json:"errors"`
 		RecommendedAction string   `json:"recommended_action"`
@@ -116,7 +116,7 @@ func (a *CASSAdapter) Health(ctx context.Context) (*HealthStatus, error) {
 					Latency:     latency,
 				}, nil
 			}
-			if !parsed.Healthy {
+			if !cassHealthIsHealthy(parsed.Status, parsed.Healthy, err) {
 				message := strings.TrimSpace(parsed.Status)
 				if message == "" {
 					message = "unhealthy"
@@ -164,6 +164,23 @@ func (a *CASSAdapter) Health(ctx context.Context) (*HealthStatus, error) {
 		LastChecked: time.Now(),
 		Latency:     latency,
 	}, nil
+}
+
+func cassHealthIsHealthy(status string, healthy *bool, cmdErr error) bool {
+	if healthy != nil {
+		return *healthy
+	}
+
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "healthy", "ok", "ready":
+		return true
+	case "unhealthy", "degraded", "error", "not_initialized", "not-initialized":
+		return false
+	}
+
+	// Fall back to process-level success if the schema omits `healthy`
+	// and status is unknown.
+	return cmdErr == nil
 }
 
 // HasCapability checks if cass has a specific capability

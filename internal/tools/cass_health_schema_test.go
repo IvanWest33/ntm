@@ -72,3 +72,21 @@ func TestCASSAdapter_HealthInitializedFalseStillMapsToUninitialized(t *testing.T
 		t.Fatalf("Health() message = %q, want uninitialized hint", health.Message)
 	}
 }
+
+func TestCASSAdapter_HealthCurrentSchemaWithoutHealthyUsesStatusAndExitCode(t *testing.T) {
+	writeFakeCassHealthScript(t,
+		`{"status":"healthy","initialized":true}`,
+		"0",
+	)
+
+	health, err := NewCASSAdapter().Health(context.Background())
+	if err != nil {
+		t.Fatalf("Health() error: %v", err)
+	}
+	if !health.Healthy {
+		t.Fatalf("Health() Healthy = false, want true when status is healthy and command succeeds")
+	}
+	if !strings.Contains(health.Message, "cass is healthy") {
+		t.Fatalf("Health() message = %q, want healthy message", health.Message)
+	}
+}
