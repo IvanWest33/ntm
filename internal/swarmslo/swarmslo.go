@@ -144,6 +144,7 @@ type RecommendationReasonCode string
 const (
 	ReasonSLOHealthy                   RecommendationReasonCode = "slo.healthy"
 	ReasonSLOMissingSource             RecommendationReasonCode = "slo.missing_source"
+	ReasonSLOInsufficientData          RecommendationReasonCode = "slo.insufficient_data"
 	ReasonSLOAckLatencyHigh            RecommendationReasonCode = "slo.time_to_first_ack.high_p95"
 	ReasonSLOAckPending                RecommendationReasonCode = "slo.time_to_first_ack.pending"
 	ReasonSLOReadyToClaimHigh          RecommendationReasonCode = "slo.ready_to_claim.high_p95"
@@ -327,15 +328,27 @@ func Recommend(in RecommendationInput) RecommendationSummary {
 	}
 
 	if len(out.Recommendations) == 0 {
-		out.Healthy = true
-		out.Recommendations = append(out.Recommendations, Recommendation{
-			Metric:         "scheduling",
-			Recommendation: RecommendationContinue,
-			Confidence:     0.9,
-			Severity:       RecommendationSeverityOK,
-			ReasonCodes:    []RecommendationReasonCode{ReasonSLOHealthy},
-			Evidence:       "all_slo_metrics_within_thresholds",
-		})
+		if hasRecommendationEvidence(summary) {
+			out.Healthy = true
+			out.Recommendations = append(out.Recommendations, Recommendation{
+				Metric:         "scheduling",
+				Recommendation: RecommendationContinue,
+				Confidence:     0.9,
+				Severity:       RecommendationSeverityOK,
+				ReasonCodes:    []RecommendationReasonCode{ReasonSLOHealthy},
+				Evidence:       "all_slo_metrics_within_thresholds",
+			})
+		} else {
+			out.Recommendations = append(out.Recommendations, Recommendation{
+				Metric:         "scheduling",
+				Recommendation: RecommendationRefreshSource,
+				Confidence:     0.5,
+				Severity:       RecommendationSeverityWatch,
+				ReasonCodes:    []RecommendationReasonCode{ReasonSLOInsufficientData},
+				Evidence:       "no_slo_samples",
+			})
+			out.Warnings = append(out.Warnings, "no slo samples available: collect events before evaluating schedule health")
+		}
 	}
 
 	sortRecommendations(out.Recommendations)
@@ -584,6 +597,22 @@ func maxFloat(a, b float64) float64 {
 		return a
 	}
 	return b
+}
+
+func hasRecommendationEvidence(summary Summary) bool {
+	dists := []Distribution{
+		summary.TimeToFirstAck,
+		summary.ReadyToClaim,
+		summary.ClaimToCloseout,
+		summary.ReservationContention,
+		summary.StaleInProgress,
+	}
+	for _, d := range dists {
+		if d.Count > 0 || d.Pending > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // computeAckLatencies measures (AckedAt - CreatedAt) over messages

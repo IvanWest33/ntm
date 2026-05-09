@@ -389,6 +389,41 @@ func TestRecommend_HealthySLOsContinueCurrentSchedule(t *testing.T) {
 	}
 }
 
+func TestRecommend_ZeroEvidenceDoesNotReportHealthySuccess(t *testing.T) {
+	t.Parallel()
+	summary := Summary{
+		GeneratedAt: clock(),
+	}
+
+	got := Recommend(RecommendationInput{Summary: summary, Thresholds: testRecommendationThresholds()})
+	if got.Healthy {
+		t.Fatal("Healthy = true, want false when there are no SLO samples")
+	}
+	if len(got.Recommendations) != 1 {
+		t.Fatalf("Recommendations = %d, want one refresh recommendation: %+v", len(got.Recommendations), got.Recommendations)
+	}
+	rec := got.Recommendations[0]
+	if rec.Metric != "scheduling" {
+		t.Fatalf("Metric = %q, want scheduling", rec.Metric)
+	}
+	if rec.Recommendation != RecommendationRefreshSource {
+		t.Fatalf("Recommendation = %q, want %q", rec.Recommendation, RecommendationRefreshSource)
+	}
+	if rec.Severity != RecommendationSeverityWatch {
+		t.Fatalf("Severity = %q, want %q", rec.Severity, RecommendationSeverityWatch)
+	}
+	if !containsRecommendationReason(rec.ReasonCodes, ReasonSLOInsufficientData) {
+		t.Fatalf("ReasonCodes = %v, want %s", rec.ReasonCodes, ReasonSLOInsufficientData)
+	}
+	if len(got.Warnings) == 0 {
+		t.Fatal("Warnings empty, want insufficient-data warning")
+	}
+	if len(got.LogRows) != 1 {
+		t.Fatalf("LogRows = %d, want 1", len(got.LogRows))
+	}
+	assertLogRowCoversRecommendation(t, got.LogRows[0], rec)
+}
+
 func TestRecommend_HighMetricDistributionsMapToSchedulingActions(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
