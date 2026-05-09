@@ -43,6 +43,9 @@ func TestCollectOptionalCASSWhenMissingRecordsDegradedSource(t *testing.T) {
 	if !hasDegradedSource(snapshot, "cass:search") {
 		t.Fatalf("missing cass should produce cass:search degraded source: %+v", snapshot.DegradedSources)
 	}
+	if hasDegradedSource(snapshot, "cass:context") {
+		t.Fatalf("missing cass should not produce stale cass:context degraded source: %+v", snapshot.DegradedSources)
+	}
 	if len(snapshot.OptionalSignals) != 0 {
 		t.Fatalf("missing cass should not emit signals, got %+v", snapshot.OptionalSignals)
 	}

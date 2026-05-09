@@ -88,7 +88,6 @@ func (collector Collector) CollectCASSSignals(ctx context.Context, snapshot *Ide
 	opts = normalizeOptionalAdapterOptions(opts)
 	if !collector.lookPath("cass") {
 		recordMissingOptionalTool(snapshot, "cass:search", SourceCASS, "cass not installed in PATH")
-		recordMissingOptionalTool(snapshot, "cass:context", SourceCASS, "cass not installed in PATH")
 		return
 	}
 	for _, query := range opts.CASSQueries {
