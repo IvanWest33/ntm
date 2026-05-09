@@ -111,16 +111,12 @@ func SanitizeArchivePath(relativePath string) (string, error) {
 		return "", fmt.Errorf("archive path %q must be relative", relativePath)
 	}
 
-	firstPart := candidate
-	if idx := strings.IndexByte(firstPart, '/'); idx >= 0 {
-		firstPart = firstPart[:idx]
-	}
-	if strings.Contains(firstPart, ":") {
-		return "", fmt.Errorf("archive path %q must not contain a drive or scheme prefix", relativePath)
-	}
 	for _, part := range strings.Split(candidate, "/") {
 		if part == ".." {
 			return "", fmt.Errorf("archive path %q escapes bundle root", relativePath)
+		}
+		if strings.Contains(part, ":") {
+			return "", fmt.Errorf("archive path %q must not contain ':' segments", relativePath)
 		}
 	}
 

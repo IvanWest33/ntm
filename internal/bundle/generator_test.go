@@ -77,6 +77,7 @@ func TestSanitizeArchivePath(t *testing.T) {
 		{name: "parent", input: "../test.txt", wantErr: true},
 		{name: "nested parent", input: "dir/../test.txt", wantErr: true},
 		{name: "windows drive", input: `C:\tmp\test.txt`, wantErr: true},
+		{name: "nested colon", input: "dir/file:ads.txt", wantErr: true},
 		{name: "scheme", input: "file://tmp/test.txt", wantErr: true},
 		{name: "nul byte", input: "dir/bad\x00name.txt", wantErr: true},
 	}
