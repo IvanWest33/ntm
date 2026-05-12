@@ -196,6 +196,20 @@ func (g *Generator) AddDirectory(basePath, relativeTo, contentType string) error
 			return nil
 		}
 
+		info, err := os.Lstat(path)
+		if err != nil {
+			g.errors = append(g.errors, fmt.Sprintf("stat error: %s: %v", path, err))
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			g.errors = append(g.errors, fmt.Sprintf("symlink skipped: %s", path))
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			g.errors = append(g.errors, fmt.Sprintf("non-regular file skipped: %s", path))
+			return nil
+		}
+
 		data, err := os.ReadFile(path)
 		if err != nil {
 			g.errors = append(g.errors, fmt.Sprintf("read error: %s: %v", path, err))
@@ -207,13 +221,7 @@ func (g *Generator) AddDirectory(basePath, relativeTo, contentType string) error
 			relPath = path
 		}
 
-		info, _ := d.Info()
-		modTime := time.Time{}
-		if info != nil {
-			modTime = info.ModTime()
-		}
-
-		return g.AddFile(relPath, data, contentType, modTime)
+		return g.AddFile(relPath, data, contentType, info.ModTime())
 	})
 }
 

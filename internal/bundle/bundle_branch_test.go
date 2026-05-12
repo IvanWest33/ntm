@@ -137,6 +137,35 @@ func TestAddDirectory_UnreadableFile(t *testing.T) {
 	}
 }
 
+func TestAddDirectory_SkipsSymlinkFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("outside secret"), 0644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	if err := os.Symlink(outsideFile, filepath.Join(dir, "linked-secret.txt")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	gen := NewGenerator(GeneratorConfig{
+		NTMVersion:      "v1.0.0",
+		RedactionConfig: redaction.Config{Mode: redaction.ModeOff},
+	})
+
+	if err := gen.AddDirectory(dir, dir, ContentTypeConfig); err != nil {
+		t.Fatalf("AddDirectory: %v", err)
+	}
+	if len(gen.files) != 0 {
+		t.Fatalf("files count = %d, want 0", len(gen.files))
+	}
+	if len(gen.errors) == 0 || !strings.Contains(strings.Join(gen.errors, "\n"), "symlink skipped") {
+		t.Fatalf("expected symlink skipped error entry, got %v", gen.errors)
+	}
+}
+
 func TestAddDirectory_NonExistentPath(t *testing.T) {
 	t.Parallel()
 
