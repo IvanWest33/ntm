@@ -227,12 +227,19 @@ func (a *DCGAdapter) GetAvailability(ctx context.Context) (*DCGAvailability, err
 	}
 	dcgAvailabilityMutex.RUnlock()
 
+	dcgAvailabilityMutex.Lock()
+	defer dcgAvailabilityMutex.Unlock()
+
+	// Double-check after acquiring write lock
+	if time.Now().Before(dcgAvailabilityExpiry) {
+		availability := dcgAvailabilityCache
+		return &availability, nil
+	}
+
 	availability := a.fetchAvailability(ctx)
 
-	dcgAvailabilityMutex.Lock()
 	dcgAvailabilityCache = *availability
 	dcgAvailabilityExpiry = time.Now().Add(dcgAvailabilityTTL)
-	dcgAvailabilityMutex.Unlock()
 
 	return availability, nil
 }
