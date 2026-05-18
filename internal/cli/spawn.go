@@ -2998,6 +2998,12 @@ func registerSpawnedAgents(workingDir, sessionName string, agents []spawnedAgent
 
 		// Add to registry for persistence
 		registry.AddAgent(agent.paneTitle, agent.paneID, registered.Name)
+		// Persist the registration_token alongside the agent name so
+		// later ntm processes can re-authenticate as this agent on
+		// mcp-agent-mail >=2.13 (ntm#146).
+		if registered.RegistrationToken != "" {
+			registry.SetRegistrationToken(registered.Name, registered.RegistrationToken)
+		}
 
 		if !IsJSONOutput() {
 			output.PrintInfof("Registered agent pane %d as %s", agent.paneIndex, registered.Name)

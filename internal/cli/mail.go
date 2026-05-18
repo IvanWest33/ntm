@@ -236,7 +236,17 @@ func newAgentMailClient(projectKey string) *agentmail.Client {
 			opts = append(opts, agentmail.WithToken(cfg.AgentMail.Token))
 		}
 	}
-	return agentmail.NewClient(opts...)
+	client := agentmail.NewClient(opts...)
+	// Pull every cached registration_token for this project out of any
+	// on-disk session registries (mcp-agent-mail >=2.13 requires the
+	// token on identity-scoped calls — ntm#146). Failure is silent:
+	// when no registry exists yet, this is a no-op, and the first
+	// register_agent / create_agent_identity call will populate
+	// the cache the regular way.
+	if projectKey != "" {
+		agentmail.HydrateClientTokensForProject(client, projectKey)
+	}
+	return client
 }
 
 func resolveAgentMailProjectKey(session string) (string, error) {
@@ -879,8 +889,12 @@ func runMailSendOverseer(cmd *cobra.Command, session string, to []string, subjec
 		projectSlug = project.Slug // Use server-provided slug if available
 	}
 
-	// Send via Human Overseer endpoint
+	// Send via Human Overseer endpoint. Prefer the MCP path (which
+	// requires ProjectKey); fall back to the legacy HTTP route via
+	// ProjectSlug when the server's MCP send_message refuses the
+	// HumanOverseer agent (older deployments).
 	result, err := client.SendOverseerMessage(ctx, agentmail.OverseerMessageOptions{
+		ProjectKey:  projectKey,
 		ProjectSlug: projectSlug,
 		Recipients:  recipients,
 		Subject:     subject,

@@ -1095,8 +1095,18 @@ func TestRunMailSendOverseerUsesSessionProjectDir(t *testing.T) {
 	if err := runMailSendOverseer(cmd, "mysession", []string{"BlueLake"}, "Subject", "Body", "", false); err != nil {
 		t.Fatalf("runMailSendOverseer() error = %v", err)
 	}
-	if len(stub.ensureProjectKeys) != 1 || stub.ensureProjectKeys[0] != projectKey {
-		t.Fatalf("expected ensure_project for %q, got %v", projectKey, stub.ensureProjectKeys)
+	// SendOverseerMessage's MCP path now calls ensure_project defensively
+	// in addition to the caller (mail.go's runMailSendOverseer already
+	// calls EnsureProject before SendOverseerMessage). Calls are
+	// idempotent server-side, so accept >= 1 call all targeting the
+	// resolved session project dir (ntm#146).
+	if len(stub.ensureProjectKeys) < 1 {
+		t.Fatalf("expected at least one ensure_project for %q, got %v", projectKey, stub.ensureProjectKeys)
+	}
+	for i, got := range stub.ensureProjectKeys {
+		if got != projectKey {
+			t.Fatalf("ensure_project call %d = %q, want %q (full list: %v)", i, got, projectKey, stub.ensureProjectKeys)
+		}
 	}
 }
 
