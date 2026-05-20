@@ -261,6 +261,8 @@ func (e *TimelineExporter) prepareData(events []state.AgentEvent) *timelineData 
 		}
 	}
 
+	events, totalEvents := timelineEventsInRange(events, timeStart, timeEnd)
+
 	// Add small padding to time range
 	duration := timeEnd.Sub(timeStart)
 	if duration < time.Minute {
@@ -335,11 +337,51 @@ func (e *TimelineExporter) prepareData(events []state.AgentEvent) *timelineData 
 		BottomMargin:    bottomMargin,
 		SessionName:     opts.SessionName,
 		ExportTime:      time.Now(),
-		TotalEvents:     len(events),
+		TotalEvents:     totalEvents,
 		Theme:           opts.Theme,
 		IncludeLegend:   opts.IncludeLegend,
 		IncludeMetadata: opts.IncludeMetadata,
 	}
+}
+
+func timelineEventsInRange(events []state.AgentEvent, timeStart, timeEnd time.Time) ([]state.AgentEvent, int) {
+	if timeEnd.Before(timeStart) {
+		return nil, 0
+	}
+
+	previousByAgent := make(map[string]state.AgentEvent)
+	hasEventAtStart := make(map[string]bool)
+	filtered := make([]state.AgentEvent, 0, len(events))
+	totalEvents := 0
+
+	for _, ev := range events {
+		if ev.Timestamp.Before(timeStart) {
+			previous, ok := previousByAgent[ev.AgentID]
+			if !ok || ev.Timestamp.After(previous.Timestamp) {
+				previousByAgent[ev.AgentID] = ev
+			}
+			continue
+		}
+		if ev.Timestamp.After(timeEnd) {
+			continue
+		}
+
+		filtered = append(filtered, ev)
+		totalEvents++
+		if ev.Timestamp.Equal(timeStart) {
+			hasEventAtStart[ev.AgentID] = true
+		}
+	}
+
+	for agentID, previous := range previousByAgent {
+		if hasEventAtStart[agentID] {
+			continue
+		}
+		previous.Timestamp = timeStart
+		filtered = append(filtered, previous)
+	}
+
+	return filtered, totalEvents
 }
 
 func (e *TimelineExporter) buildSegments(events []state.AgentEvent, timeStart, timeEnd time.Time, duration time.Duration, xOffset, barWidth float64) []timeSegment {
