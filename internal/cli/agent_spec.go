@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/Dicklesworthstone/ntm/internal/persona"
 )
 
 var (
@@ -157,6 +159,12 @@ type FlatAgent struct {
 	Index           int    // 1-based index within type
 	Model           string // Resolved model (may be empty for default)
 	ReasoningEffort string // Reasoning-effort hint (Codex `model_reasoning_effort`)
+	// Persona is non-nil when this agent was produced by expanding a
+	// --profile-set / --profiles persona list (ntm#149). When set, Type
+	// already reflects the persona's own agent_type and the spawn loop uses
+	// the persona's model/system-prompt/name directly, instead of overlaying
+	// a persona onto a generic agent by position.
+	Persona *persona.Persona
 }
 
 // Flatten expands all specs into individual agent entries

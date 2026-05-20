@@ -414,11 +414,109 @@ func normalizeSpawnOptions(opts *SpawnOptions) {
 	}
 }
 
-func profileAssignmentWarning(profileCount, agentCount int) string {
-	if profileCount == 0 || agentCount == 0 || profileCount == agentCount {
-		return ""
+// expandProfileAgents converts an ordered persona list (from --profile-set or
+// --profiles) into concrete spawn agents — one agent per persona, in
+// persona-set order, with each agent's Type taken from the persona's own
+// agent_type and the persona attached. This makes --profile-set a first-class
+// spawn contract (persona drives the agent) instead of an order-dependent
+// overlay on generic agents (ntm#149).
+//
+// When the caller also supplied explicit generic counts (--cc/--cod/--gmi/...),
+// the persona set's per-type distribution must match those counts exactly;
+// otherwise expansion fails closed so a pane can never silently run the wrong
+// agent CLI or receive the wrong persona.
+func expandProfileAgents(profiles []*persona.Persona, requested AgentSpecs) ([]FlatAgent, error) {
+	if len(profiles) == 0 {
+		return nil, nil
 	}
-	return fmt.Sprintf("Warning: %d profiles for %d agents; profiles will be assigned in order", profileCount, agentCount)
+
+	agents := make([]FlatAgent, 0, len(profiles))
+	indices := make(map[AgentType]int)
+	personaCounts := make(map[AgentType]int)
+	for _, p := range profiles {
+		if p == nil {
+			continue
+		}
+		at := AgentType(p.AgentTypeFlag())
+		indices[at]++
+		personaCounts[at]++
+		agents = append(agents, FlatAgent{
+			Type:    at,
+			Index:   indices[at],
+			Model:   p.Model,
+			Persona: p,
+		})
+	}
+
+	// Validate against any explicitly requested generic counts. An empty
+	// request means "let the persona set fully drive the spawn".
+	requestedCounts := make(map[AgentType]int)
+	for _, s := range requested {
+		requestedCounts[s.Type] += s.Count
+	}
+	if len(requestedCounts) > 0 {
+		if err := validateProfileAgentDistribution(personaCounts, requestedCounts); err != nil {
+			return nil, err
+		}
+	}
+
+	return agents, nil
+}
+
+// validateProfileAgentDistribution fails closed when the per-type agent
+// distribution implied by a persona set does not match the explicitly
+// requested generic counts. This catches both a raw count mismatch
+// (--cod=3 vs a 2-codex set) and an agent-type conflict (a claude persona
+// dropped into a codex-only request).
+func validateProfileAgentDistribution(personaCounts, requestedCounts map[AgentType]int) error {
+	typeSet := make(map[AgentType]struct{})
+	for t := range personaCounts {
+		typeSet[t] = struct{}{}
+	}
+	for t := range requestedCounts {
+		typeSet[t] = struct{}{}
+	}
+	types := make([]string, 0, len(typeSet))
+	for t := range typeSet {
+		types = append(types, string(t))
+	}
+	sort.Strings(types)
+
+	var mismatches []string
+	for _, ts := range types {
+		t := AgentType(ts)
+		if personaCounts[t] != requestedCounts[t] {
+			mismatches = append(mismatches, fmt.Sprintf("%s: profile-set defines %d, you requested %d", ts, personaCounts[t], requestedCounts[t]))
+		}
+	}
+	if len(mismatches) > 0 {
+		return fmt.Errorf("profile-set agent distribution conflicts with the requested agent counts (%s); either drop the per-type counts and let --profile-set drive the spawn, or make the counts match the persona set exactly", strings.Join(mismatches, "; "))
+	}
+	return nil
+}
+
+// countFlatAgentsByType tallies a flattened agent list by agent type. Used to
+// keep CCCount/CodCount/GmiCount (and friends) consistent after a persona set
+// expands into the concrete agent list.
+func countFlatAgentsByType(agents []FlatAgent) map[AgentType]int {
+	counts := make(map[AgentType]int)
+	for _, a := range agents {
+		counts[a.Type]++
+	}
+	return counts
+}
+
+// sortPanesForAssignment orders panes deterministically — by window index, then
+// pane index — so agent[i] always lands on the same pane regardless of the
+// order tmux list-panes happens to return. This is what makes persona→pane
+// assignment reproducible for role-based --profile-set spawns (ntm#149).
+func sortPanesForAssignment(panes []tmux.Pane) {
+	sort.SliceStable(panes, func(i, j int) bool {
+		if panes[i].WindowIndex != panes[j].WindowIndex {
+			return panes[i].WindowIndex < panes[j].WindowIndex
+		}
+		return panes[i].Index < panes[j].Index
+	})
 }
 
 func legacySpawnTotalAgentCount(opts SpawnOptions) int {
@@ -611,8 +709,12 @@ type SpawnOptions struct {
 	PersonaMap         map[string]*persona.Persona
 	PluginMap          map[string]plugins.AgentPlugin
 
-	// Profile mapping: list of persona names to map to agents in order
+	// Profile mapping: list of personas (from --profile-set/--profiles),
+	// expanded into concrete ordered agents via expandProfileAgents (ntm#149).
 	ProfileList []*persona.Persona
+	// ProfileSetName is the --profile-set name, surfaced in the post-launch
+	// persona→pane mapping. Empty for --profiles (comma list) spawns.
+	ProfileSetName string
 
 	// CASS Context
 	CassContextQuery string
@@ -1172,9 +1274,24 @@ Examples:
 			}
 
 			assignAgentFilter := resolveSpawnAssignAgentType(assignAgentType, assignCCOnly, assignCodOnly, assignGmiOnly)
+
+			// Build the concrete agent list. When a persona set/list is
+			// requested (--profile-set/--profiles), expand it into ordered
+			// concrete agents (ntm#149); the persona drives each agent's type,
+			// model, and prompt. normalizeSpawnOptions recomputes per-type
+			// counts from this list, so pane creation/preflight stay consistent.
+			agentsFlat := agentSpecs.Flatten()
+			if len(profileList) > 0 {
+				expanded, expandErr := expandProfileAgents(profileList, agentSpecs)
+				if expandErr != nil {
+					return expandErr
+				}
+				agentsFlat = expanded
+			}
+
 			opts := SpawnOptions{
 				Session:                 sessionName,
-				Agents:                  agentSpecs.Flatten(),
+				Agents:                  agentsFlat,
 				CCCount:                 ccCount,
 				CodCount:                codCount,
 				GmiCount:                gmiCount,
@@ -1200,6 +1317,7 @@ Examples:
 				Stagger:                 staggerDuration,
 				StaggerEnabled:          staggerEnabled,
 				ProfileList:             profileList,
+				ProfileSetName:          profileSetFlag,
 				Assign:                  assignEnabled,
 				AssignStrategy:          assignStrategy,
 				AssignLimit:             assignLimit,
@@ -1229,10 +1347,6 @@ Examples:
 				ApplySessionProfileToSpawnOptions(&opts, profile)
 				normalizeSpawnOptions(&opts)
 			}
-			if msg := profileAssignmentWarning(len(profileList), len(opts.Agents)); msg != "" && !IsJSONOutput() {
-				fmt.Println(msg)
-			}
-
 			return spawnSessionLogic(opts)
 		},
 	}
@@ -1640,6 +1754,11 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 		return outputError(err)
 	}
 
+	// Assign panes in a deterministic order rather than relying on tmux
+	// list-panes ordering, so agent[i] always lands on the same pane and
+	// persona→pane assignment is reproducible for --profile-set spawns (ntm#149).
+	sortPanesForAssignment(panes)
+
 	// Start assigning agents (skip first pane if user pane)
 	startIdx := 0
 	if opts.UserPane {
@@ -1647,7 +1766,6 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 	}
 
 	agentNum := startIdx
-	profileIdx := 0 // Track which profile from ProfileList to assign
 	if !IsJSONOutput() {
 		steps.Start(fmt.Sprintf("Launching %d agent(s)", len(opts.Agents)))
 	}
@@ -1660,6 +1778,7 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 		agentType     string
 		model         string // alias
 		resolvedModel string // full name
+		persona       string // persona name when launched from --profile-set/--profiles (ntm#149)
 		command       string
 		promptDelay   time.Duration // Stagger delay before prompt delivery
 	}
@@ -1897,10 +2016,12 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 			}
 		}
 
-		// Check if there's a profile to assign from ProfileList (--profiles/--profile-set)
-		// ProfileList takes precedence over PersonaMap for system prompt
-		if len(opts.ProfileList) > profileIdx {
-			profile := opts.ProfileList[profileIdx]
+		// Persona attached during --profile-set/--profiles expansion (ntm#149).
+		// agent.Type already reflects the persona's own agent_type, so the
+		// command template selected above launches the right CLI. This takes
+		// precedence over the model-keyed PersonaMap above.
+		if agent.Persona != nil {
+			profile := agent.Persona
 			personaName = profile.Name
 			if strings.TrimSpace(profile.Model) != "" {
 				modelRequested = true
@@ -1916,7 +2037,7 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 				systemPromptFile = promptFile
 			}
 			if !IsJSONOutput() {
-				fmt.Printf("  → Assigning profile '%s' to agent %d\n", profile.Name, profileIdx+1)
+				fmt.Printf("  → persona '%s' → pane %s_%d\n", profile.Name, agent.Type, agent.Index)
 			}
 		}
 
@@ -2147,13 +2268,13 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 			agentType:     string(agent.Type),
 			model:         agent.Model,
 			resolvedModel: resolvedModel,
+			persona:       personaName,
 			command:       safeAgentCmd,
 			promptDelay:   promptDelay,
 		})
 		auditAgentsLaunched = len(launchedAgents)
 
 		staggerAgentIdx++
-		profileIdx++
 		agentNum++
 	}
 
@@ -2331,10 +2452,16 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 
 	// JSON output mode
 	if IsJSONOutput() {
-		// Build map of pane index -> stagger delay for lookup
+		// Build maps of pane index -> stagger delay and -> persona name for
+		// lookup. The persona map yields the deterministic persona→pane
+		// mapping orchestrators need after a --profile-set launch (ntm#149).
 		paneDelays := make(map[int]time.Duration)
+		panePersonas := make(map[int]string)
 		for _, agent := range launchedAgents {
 			paneDelays[agent.paneIndex] = agent.promptDelay
+			if agent.persona != "" {
+				panePersonas[agent.paneIndex] = agent.persona
+			}
 		}
 
 		paneResponses := make([]output.PaneResponse, len(finalPanes))
@@ -2345,6 +2472,7 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 				Title:         p.Title,
 				Type:          agentTypeToString(p.Type),
 				Variant:       p.Variant, // Model alias or persona name
+				Persona:       panePersonas[p.Index],
 				Active:        p.Active,
 				Width:         p.Width,
 				Height:        p.Height,
@@ -2392,6 +2520,7 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 			AgentCounts:         agentCounts,
 			Stagger:             staggerCfg,
 			AgentMail:           agentMailStatus,
+			ProfileSet:          opts.ProfileSetName,
 		}
 
 		// If assignment is enabled, wait for agents and run assignment phase

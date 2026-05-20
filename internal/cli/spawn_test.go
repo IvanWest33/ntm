@@ -15,6 +15,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/cm"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
@@ -1023,16 +1024,133 @@ func TestNormalizeSpawnOptions_RecomputesModernCountsFromAgents(t *testing.T) {
 	}
 }
 
-func TestProfileAssignmentWarning(t *testing.T) {
+func TestExpandProfileAgents_PersonaSetDrivesOrderAndType(t *testing.T) {
+	// architect=claude, developer=codex, auditor=codex — order and per-persona
+	// agent_type must be preserved, with the persona attached to each agent.
+	profiles := []*persona.Persona{
+		{Name: "architect", AgentType: "claude", Model: "opus"},
+		{Name: "developer", AgentType: "codex", Model: "gpt-5.5"},
+		{Name: "auditor", AgentType: "codex"},
+	}
 
-	if msg := profileAssignmentWarning(0, 3); msg != "" {
-		t.Fatalf("profileAssignmentWarning(0, 3) = %q, want empty", msg)
+	agents, err := expandProfileAgents(profiles, nil)
+	if err != nil {
+		t.Fatalf("expandProfileAgents: unexpected error: %v", err)
 	}
-	if msg := profileAssignmentWarning(2, 2); msg != "" {
-		t.Fatalf("profileAssignmentWarning(2, 2) = %q, want empty", msg)
+	if len(agents) != 3 {
+		t.Fatalf("got %d agents, want 3", len(agents))
 	}
-	if msg := profileAssignmentWarning(2, 5); msg != "Warning: 2 profiles for 5 agents; profiles will be assigned in order" {
-		t.Fatalf("profileAssignmentWarning(2, 5) = %q", msg)
+
+	wantType := []AgentType{AgentTypeClaude, AgentTypeCodex, AgentTypeCodex}
+	wantName := []string{"architect", "developer", "auditor"}
+	wantIndex := []int{1, 1, 2} // per-type 1-based index
+	for i, a := range agents {
+		if a.Type != wantType[i] {
+			t.Fatalf("agent[%d].Type = %q, want %q", i, a.Type, wantType[i])
+		}
+		if a.Persona == nil || a.Persona.Name != wantName[i] {
+			t.Fatalf("agent[%d] persona = %v, want %q", i, a.Persona, wantName[i])
+		}
+		if a.Index != wantIndex[i] {
+			t.Fatalf("agent[%d].Index = %d, want %d", i, a.Index, wantIndex[i])
+		}
+	}
+	if agents[0].Model != "opus" || agents[1].Model != "gpt-5.5" {
+		t.Fatalf("models not carried from personas: %q, %q", agents[0].Model, agents[1].Model)
+	}
+}
+
+func TestExpandProfileAgents_MatchingRequestedCountsSucceeds(t *testing.T) {
+	// --cod=3 with a 3-codex persona set is consistent and must succeed.
+	profiles := []*persona.Persona{
+		{Name: "p1", AgentType: "codex"},
+		{Name: "p2", AgentType: "codex"},
+		{Name: "p3", AgentType: "codex"},
+	}
+	requested := AgentSpecs{{Type: AgentTypeCodex, Count: 3}}
+	agents, err := expandProfileAgents(profiles, requested)
+	if err != nil {
+		t.Fatalf("expandProfileAgents: unexpected error: %v", err)
+	}
+	if len(agents) != 3 {
+		t.Fatalf("got %d agents, want 3", len(agents))
+	}
+}
+
+func TestExpandProfileAgents_CountMismatchFailsClosed(t *testing.T) {
+	// --cod=3 but only 2 codex personas — must fail closed, not silently warn.
+	profiles := []*persona.Persona{
+		{Name: "p1", AgentType: "codex"},
+		{Name: "p2", AgentType: "codex"},
+	}
+	requested := AgentSpecs{{Type: AgentTypeCodex, Count: 3}}
+	_, err := expandProfileAgents(profiles, requested)
+	if err == nil {
+		t.Fatal("expected error for count mismatch, got nil")
+	}
+	if !strings.Contains(err.Error(), "cod") {
+		t.Fatalf("error should mention the conflicting type: %v", err)
+	}
+}
+
+func TestExpandProfileAgents_AgentTypeConflictFailsClosed(t *testing.T) {
+	// --cod=3 but the set mixes a claude persona — agent_type conflict.
+	profiles := []*persona.Persona{
+		{Name: "architect", AgentType: "claude"},
+		{Name: "developer", AgentType: "codex"},
+		{Name: "auditor", AgentType: "codex"},
+	}
+	requested := AgentSpecs{{Type: AgentTypeCodex, Count: 3}}
+	_, err := expandProfileAgents(profiles, requested)
+	if err == nil {
+		t.Fatal("expected error for agent_type conflict, got nil")
+	}
+}
+
+func TestExpandProfileAgents_EmptyReturnsNil(t *testing.T) {
+	agents, err := expandProfileAgents(nil, nil)
+	if err != nil || agents != nil {
+		t.Fatalf("expandProfileAgents(nil,nil) = (%v, %v), want (nil, nil)", agents, err)
+	}
+}
+
+func TestSortPanesForAssignment_DeterministicOrder(t *testing.T) {
+	// Panes returned out of order (and across two windows) must sort to a
+	// stable (window, index) order so persona→pane mapping is reproducible.
+	panes := []tmux.Pane{
+		{ID: "%3", Index: 2, WindowIndex: 0},
+		{ID: "%1", Index: 0, WindowIndex: 0},
+		{ID: "%5", Index: 0, WindowIndex: 1},
+		{ID: "%2", Index: 1, WindowIndex: 0},
+	}
+	sortPanesForAssignment(panes)
+	wantIDs := []string{"%1", "%2", "%3", "%5"}
+	for i, p := range panes {
+		if p.ID != wantIDs[i] {
+			t.Fatalf("panes[%d].ID = %q, want %q (order=%v)", i, p.ID, wantIDs[i], panes)
+		}
+	}
+}
+
+func TestValidateProfileAgentDistribution(t *testing.T) {
+	tests := []struct {
+		name      string
+		persona   map[AgentType]int
+		requested map[AgentType]int
+		wantErr   bool
+	}{
+		{"exact match", map[AgentType]int{AgentTypeCodex: 3}, map[AgentType]int{AgentTypeCodex: 3}, false},
+		{"count mismatch", map[AgentType]int{AgentTypeCodex: 2}, map[AgentType]int{AgentTypeCodex: 3}, true},
+		{"type missing in request", map[AgentType]int{AgentTypeClaude: 1, AgentTypeCodex: 2}, map[AgentType]int{AgentTypeCodex: 3}, true},
+		{"type missing in persona", map[AgentType]int{AgentTypeCodex: 3}, map[AgentType]int{AgentTypeClaude: 1, AgentTypeCodex: 3}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateProfileAgentDistribution(tc.persona, tc.requested)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateProfileAgentDistribution err = %v, wantErr = %v", err, tc.wantErr)
+			}
+		})
 	}
 }
 

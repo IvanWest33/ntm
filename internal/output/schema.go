@@ -69,6 +69,7 @@ type PaneResponse struct {
 	Title          string  `json:"title"`
 	Type           string  `json:"type"`              // claude, codex, gemini, user
 	Variant        string  `json:"variant,omitempty"` // model alias or persona name
+	Persona        string  `json:"persona,omitempty"` // persona name when spawned via --profile-set/--profiles (ntm#149)
 	Active         bool    `json:"active,omitempty"`
 	Width          int     `json:"width,omitempty"`
 	Height         int     `json:"height,omitempty"`
@@ -126,6 +127,10 @@ type SpawnResponse struct {
 	AgentCounts      AgentCountsResponse   `json:"agent_counts"`
 	Stagger          *StaggerConfig        `json:"stagger,omitempty"`
 	AgentMail        *AgentMailSpawnStatus `json:"agent_mail,omitempty"`
+	// ProfileSet is the --profile-set name when the session was spawned from a
+	// persona set. Combined with each pane's `persona` field this gives an
+	// orchestrator a deterministic persona→pane mapping (ntm#149).
+	ProfileSet string `json:"profile_set,omitempty"`
 }
 
 // CreateResponse is the output format for create command (basic session)
