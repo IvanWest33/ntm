@@ -3,10 +3,12 @@ package cli
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/robot"
+	sessionpkg "github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -117,13 +119,28 @@ func runRespawn(session string, force bool, panesFlag string, agentType string, 
 		}
 	}
 
+	// bd-ntm-respawn-replay-launch-cmd-tu44r: load the per-pane launch
+	// commands persisted by spawn.go so we can replay the exact agent CLI
+	// invocation after killing the current process. Missing/old sessions
+	// (panes.json doesn't exist or doesn't list this pane id) fall back to
+	// the legacy `tmux respawn-pane -k` shape and the user sees the same
+	// behavior as before — no regression for sessions spawned by an older
+	// ntm version.
+	launchCmds, launchCmdsErr := sessionpkg.LoadPaneLaunchCommands(session)
+	if launchCmdsErr != nil {
+		fmt.Printf(
+			"⚠ Warning: failed to load persisted launch commands for '%s': %v\n",
+			session, launchCmdsErr,
+		)
+	}
+
 	// Restart targets
 	var restarted []string
 	var failed []string
 	for _, pane := range targetPanes {
 		paneKey := fmt.Sprintf("%d", pane.Index)
-		err := tmux.RespawnPane(pane.ID, true)
-		if err != nil {
+		recorded, hasRecord := launchCmds.LookupCommandByPaneID(pane.ID)
+		if err := respawnPaneWithRecordedCommand(pane.ID, recorded.Command, hasRecord); err != nil {
 			failed = append(failed, fmt.Sprintf("%s: %v", paneKey, err))
 		} else {
 			restarted = append(restarted, paneKey)
@@ -142,6 +159,35 @@ func runRespawn(session string, force bool, panesFlag string, agentType string, 
 		return fmt.Errorf("%d pane(s) failed to restart", len(failed))
 	}
 
+	return nil
+}
+
+// respawnPaneWithRecordedCommand kills the pane's current process (-k),
+// respawns it to a fresh interactive bash via `tmux respawn-pane -k -t
+// <pane>` (the legacy path), and — when we have a recorded launch command
+// from spawn-time persistence — sends the command via SendKeys so the
+// pane comes back with the same agent CLI (model/persona/reasoning/
+// system-prompt flags) instead of a bare bash.
+//
+// When hasRecord is false we keep the legacy `tmux respawn-pane` semantics
+// untouched; that preserves behaviour for sessions spawned by an older ntm
+// version that never wrote panes.json.
+//
+// bd-ntm-respawn-replay-launch-cmd-tu44r.
+func respawnPaneWithRecordedCommand(paneID, recordedCmd string, hasRecord bool) error {
+	if err := tmux.RespawnPane(paneID, true); err != nil {
+		return err
+	}
+	if !hasRecord || strings.TrimSpace(recordedCmd) == "" {
+		return nil
+	}
+	// Give the freshly-respawned shell a brief moment to render its prompt
+	// before we type the agent command. Matches the heuristic used in
+	// spawn.go's post-launch sleep before sending prompts.
+	time.Sleep(300 * time.Millisecond)
+	if err := tmux.SendKeys(paneID, recordedCmd, true); err != nil {
+		return fmt.Errorf("replay recorded launch command: %w", err)
+	}
 	return nil
 }
 

@@ -40,6 +40,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/recipe"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
+	"github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/webhook"
@@ -2422,6 +2423,31 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 		fmt.Sprintf("Session %s created", opts.Session),
 		spawnSessionCreatedEventFields(opts, dir),
 	))
+
+	// bd-ntm-respawn-replay-launch-cmd-tu44r: persist resolved per-pane
+	// launch commands to ~/.ntm/sessions/<session>/panes.json so a later
+	// `ntm respawn` can replay each pane's exact agent CLI invocation. Without
+	// this, tmux respawn-pane with no command argument falls back to the
+	// pane's original start command (the default shell), which loses
+	// model/persona/reasoning-effort flags and is the root of bd-cy5r.
+	{
+		paneCmds := make([]session.PaneLaunchCommand, 0, len(launchedAgents))
+		for _, a := range launchedAgents {
+			paneCmds = append(paneCmds, session.PaneLaunchCommand{
+				PaneID:        a.paneID,
+				PaneIndex:     a.paneIndex,
+				PaneTitle:     a.paneTitle,
+				AgentType:     a.agentType,
+				Model:         a.model,
+				ResolvedModel: a.resolvedModel,
+				Persona:       a.persona,
+				Command:       a.command,
+			})
+		}
+		if err := session.SavePaneLaunchCommands(opts.Session, paneCmds); err != nil && !IsJSONOutput() {
+			fmt.Printf("⚠ Warning: failed to persist pane launch commands: %v\n", err)
+		}
+	}
 
 	for _, agent := range launchedAgents {
 		events.DefaultEmitter().Emit(events.NewWebhookEvent(
