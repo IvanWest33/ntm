@@ -213,6 +213,11 @@ type SessionStartResult struct {
 type ReservationResult struct {
 	Granted   []FileReservation     `json:"granted"`
 	Conflicts []ReservationConflict `json:"conflicts"`
+	// Warnings carries server-side advisory notices (bd-i2t4l). Older
+	// servers omit the field entirely; newer servers populate it with
+	// strings such as "enforcement_off_for_code_paths: ...". Consumers
+	// must treat the field as optional and tolerate missing/empty.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // ReservationConflict represents a file reservation conflict.

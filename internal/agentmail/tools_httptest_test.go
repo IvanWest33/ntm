@@ -734,6 +734,93 @@ func TestReservePaths_PreservesServerProvidedAgentName(t *testing.T) {
 	}
 }
 
+// bd-i2t4l: forward-compatible warnings[] field round-trip. When the
+// upstream mcp_agent_mail server (Dicklesworthstone#162) ships the
+// warnings field, the Go client must unmarshal it into
+// ReservationResult.Warnings so the CLI can surface it.
+func TestReservePaths_WarningsFieldRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
+		"file_reservation_paths": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
+			return map[string]interface{}{
+				"granted": []map[string]interface{}{
+					{
+						"id":           1,
+						"path_pattern": "src/foo.py",
+						"agent_name":   "TestAgent",
+						"exclusive":    true,
+						"reason":       "bd-i2t4l-test",
+						"expires_ts":   "2030-01-01T00:00:00Z",
+					},
+				},
+				"conflicts": []interface{}{},
+				"warnings": []string{
+					"enforcement_off_for_code_paths: 1 of 1 reserved paths are code-repo paths; advisory only.",
+				},
+			}, nil
+		},
+	}))
+	defer server.Close()
+
+	c := NewClient(WithBaseURL(server.URL + "/"))
+	result, err := c.ReservePaths(context.Background(), FileReservationOptions{
+		ProjectKey: "/test",
+		AgentName:  "TestAgent",
+		Paths:      []string{"src/foo.py"},
+		TTLSeconds: 600,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Warnings) != 1 {
+		t.Fatalf("len(warnings) = %d, want 1", len(result.Warnings))
+	}
+	if !strings.HasPrefix(result.Warnings[0], "enforcement_off_for_code_paths") {
+		t.Errorf("warnings[0] = %q, want prefix 'enforcement_off_for_code_paths'", result.Warnings[0])
+	}
+}
+
+// bd-i2t4l: when the server omits warnings entirely (pre-upstream
+// release), the field is nil/empty and the Go side tolerates that
+// silently. The CLI's printLockWarnings is a no-op on empty input.
+func TestReservePaths_WarningsAbsentIsTolerated(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
+		"file_reservation_paths": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
+			return map[string]interface{}{
+				"granted": []map[string]interface{}{
+					{
+						"id":           2,
+						"path_pattern": "src/bar.py",
+						"agent_name":   "TestAgent",
+						"exclusive":    true,
+						"reason":       "bd-i2t4l-test",
+						"expires_ts":   "2030-01-01T00:00:00Z",
+					},
+				},
+				"conflicts": []interface{}{},
+				// warnings field intentionally omitted (pre-upstream release shape)
+			}, nil
+		},
+	}))
+	defer server.Close()
+
+	c := NewClient(WithBaseURL(server.URL + "/"))
+	result, err := c.ReservePaths(context.Background(), FileReservationOptions{
+		ProjectKey: "/test",
+		AgentName:  "TestAgent",
+		Paths:      []string{"src/bar.py"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Warnings) != 0 {
+		t.Errorf("len(warnings) = %d, want 0 when server omits the field", len(result.Warnings))
+	}
+}
+
 func TestReservePaths_Conflict(t *testing.T) {
 	t.Parallel()
 

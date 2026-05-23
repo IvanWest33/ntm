@@ -56,6 +56,12 @@ type LockResult struct {
 	Agent     string                          `json:"agent"`
 	Granted   []agentmail.FileReservation     `json:"granted,omitempty"`
 	Conflicts []agentmail.ReservationConflict `json:"conflicts,omitempty"`
+	// Warnings carries advisory notices from the agent-mail server
+	// (bd-i2t4l). Mirrored from agentmail.ReservationResult.Warnings
+	// so JSON callers see the same field shape. Most commonly
+	// "enforcement_off_for_code_paths: ..." when reserving non-archive
+	// paths (server-side enforcement only covers mail-archive paths).
+	Warnings  []string                        `json:"warnings,omitempty"`
 	TTL       string                          `json:"ttl"`
 	ExpiresAt *time.Time                      `json:"expires_at,omitempty"`
 	Error     string                          `json:"error,omitempty"`
@@ -128,6 +134,7 @@ func runLock(session string, patterns []string, reason, ttlStr string, shared bo
 			result.Success = false
 			result.Granted = reservation.Granted
 			result.Conflicts = reservation.Conflicts
+			result.Warnings = reservation.Warnings
 		} else {
 			result.Success = false
 			result.Error = err.Error()
@@ -135,6 +142,7 @@ func runLock(session string, patterns []string, reason, ttlStr string, shared bo
 	} else {
 		result.Success = true
 		result.Granted = reservation.Granted
+		result.Warnings = reservation.Warnings
 		if len(reservation.Granted) > 0 {
 			t := reservation.Granted[0].ExpiresTS.Time
 			result.ExpiresAt = &t
@@ -161,6 +169,12 @@ func printLockResult(result LockResult, shared bool) error {
 	if shared {
 		lockType = "shared"
 	}
+
+	// bd-i2t4l: surface server-side advisory warnings to stderr above
+	// the success line so workers see "enforcement_off_for_code_paths"
+	// etc. before they assume the reservation is enforced. Forward-
+	// compatible: older servers omit the field and the loop is a no-op.
+	printLockWarnings(result.Warnings)
 
 	if result.Success {
 		fmt.Printf("Reserved %d path(s) (%s)\n", len(result.Granted), lockType)
@@ -194,4 +208,23 @@ func printLockResult(result LockResult, shared bool) error {
 		return fmt.Errorf("%s", result.Error)
 	}
 	return fmt.Errorf("lock failed")
+}
+
+// printLockWarnings emits non-empty server-side advisory warnings to
+// stderr so operators see them above the "Reserved N path(s)" success
+// line. Forward-compatible with servers that don't yet ship the
+// warnings[] field (the input slice is empty, the loop is a no-op).
+//
+// bd-i2t4l: this surfaces the "enforcement_off_for_code_paths" warning
+// the upstream mcp_agent_mail PR (Dicklesworthstone#162) adds to
+// file_reservation_paths responses on code-repo paths. Operators no
+// longer have to parse the docstring to learn that server-side
+// exclusivity is advisory-only for non-archive paths.
+func printLockWarnings(warnings []string) {
+	for _, w := range warnings {
+		if strings.TrimSpace(w) == "" {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "WARN: %s\n", w)
+	}
 }
