@@ -651,6 +651,89 @@ func TestReservePaths(t *testing.T) {
 	}
 }
 
+// bd-p9igp: when the mcp_agent_mail server returns granted entries WITHOUT
+// an agent_name field (which is its actual production shape per
+// app.py:11011-11018 — the payload includes only id/path_pattern/exclusive/
+// reason/expires_ts), the client must populate AgentName from
+// opts.AgentName so downstream consumers (CLI --json, locks list, the
+// pre-commit guard) see the correct agent.
+func TestReservePaths_PopulatesAgentNameWhenServerOmitsIt(t *testing.T) {
+	t.Parallel()
+
+	// Mock server returns granted entries WITHOUT the agent_name field —
+	// matches the real mcp_agent_mail server's payload shape (bd-p9igp).
+	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
+		"file_reservation_paths": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
+			// Use a raw map so the JSON response intentionally omits
+			// the "agent_name" key (matching real-server behavior).
+			return map[string]interface{}{
+				"granted": []map[string]interface{}{
+					{
+						"id":           42,
+						"path_pattern": "src/foo.py",
+						"exclusive":    true,
+						"reason":       "bd-p9igp-test",
+						"expires_ts":   "2030-01-01T00:00:00Z",
+					},
+				},
+				"conflicts": []interface{}{},
+			}, nil
+		},
+	}))
+	defer server.Close()
+
+	c := NewClient(WithBaseURL(server.URL + "/"))
+	result, err := c.ReservePaths(context.Background(), FileReservationOptions{
+		ProjectKey: "/test",
+		AgentName:  "TestAgent",
+		Paths:      []string{"src/foo.py"},
+		TTLSeconds: 600,
+		Exclusive:  true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Granted) != 1 {
+		t.Fatalf("len(granted) = %d, want 1", len(result.Granted))
+	}
+	// The fix: AgentName must be populated from opts.AgentName even
+	// though the server omitted it from the granted payload.
+	if got := result.Granted[0].AgentName; got != "TestAgent" {
+		t.Errorf("granted[0].AgentName = %q, want %q", got, "TestAgent")
+	}
+}
+
+// bd-p9igp: when the server DOES include agent_name in granted (e.g. after
+// the matching upstream fix lands), the client must not overwrite it.
+func TestReservePaths_PreservesServerProvidedAgentName(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
+		"file_reservation_paths": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
+			return ReservationResult{
+				Granted: []FileReservation{
+					{ID: 1, PathPattern: "src/foo.py", AgentName: "ServerSaidThisAgent", Exclusive: true},
+				},
+				Conflicts: nil,
+			}, nil
+		},
+	}))
+	defer server.Close()
+
+	c := NewClient(WithBaseURL(server.URL + "/"))
+	result, err := c.ReservePaths(context.Background(), FileReservationOptions{
+		ProjectKey: "/test",
+		AgentName:  "OptsSaidThisAgent",
+		Paths:      []string{"src/foo.py"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := result.Granted[0].AgentName; got != "ServerSaidThisAgent" {
+		t.Errorf("granted[0].AgentName = %q, want %q (server-provided value must not be overwritten)", got, "ServerSaidThisAgent")
+	}
+}
+
 func TestReservePaths_Conflict(t *testing.T) {
 	t.Parallel()
 

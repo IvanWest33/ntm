@@ -538,6 +538,26 @@ func (c *Client) ReservePaths(ctx context.Context, opts FileReservationOptions) 
 		return nil, NewAPIError("file_reservation_paths", 0, err)
 	}
 
+	// bd-p9igp (2026-05-23): the mcp_agent_mail server's `granted` payload
+	// for `file_reservation_paths` does NOT include `agent_name` per row
+	// (see app.py:11011-11018 — it serializes only id/path_pattern/exclusive/
+	// reason/expires_ts). The Go FileReservation.AgentName therefore unmarshals
+	// to "" for every granted entry, even though the reservation was
+	// successfully filed under opts.AgentName server-side. That empty field
+	// then leaks into the CLI's --json output and downstream consumers
+	// (bd-xc0k6 reproduction: `granted[*].agent_name = ""`).
+	//
+	// The granted reservations are by definition this caller's reservations
+	// (the server only returns rows under the agent identified by the request),
+	// so it's safe — and correct — to populate the field client-side from
+	// opts.AgentName. The companion list query / server-side persistence
+	// fixes are tracked under bd-fhm64 / bd-unqoc.
+	for i := range reservationResult.Granted {
+		if reservationResult.Granted[i].AgentName == "" {
+			reservationResult.Granted[i].AgentName = opts.AgentName
+		}
+	}
+
 	// Check for conflicts
 	if len(reservationResult.Conflicts) > 0 {
 		return &reservationResult, fmt.Errorf("%w: %d conflicts", ErrReservationConflict, len(reservationResult.Conflicts))
