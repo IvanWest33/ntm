@@ -3,6 +3,8 @@ package robot
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +56,55 @@ func TestRestartPaneBeadPromptExpansion(t *testing.T) {
 	// The bead_id should appear multiple times (in work-on and br show)
 	if strings.Count(prompt, beadID) < 2 {
 		t.Errorf("bead ID should appear at least twice in prompt (work-on + br show), got %d", strings.Count(prompt, beadID))
+	}
+}
+
+func TestBuildBeadPromptWithTimeoutBoundsBrShow(t *testing.T) {
+	binDir := t.TempDir()
+	brPath := filepath.Join(binDir, "br")
+	if err := os.WriteFile(brPath, []byte("#!/bin/sh\nexec sleep 2\n"), 0o755); err != nil {
+		t.Fatalf("write fake br: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	start := time.Now()
+	_, err := buildBeadPromptWithTimeout("bd-timeout", 20*time.Millisecond)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("buildBeadPromptWithTimeout returned nil error for sleeping br")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("error = %q, want timeout", err.Error())
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("buildBeadPromptWithTimeout took %s, want bounded timeout", elapsed)
+	}
+}
+
+func TestBuildBeadPromptWithTimeoutUsesRunBdTimeout(t *testing.T) {
+	old := runRestartPaneBr
+	t.Cleanup(func() { runRestartPaneBr = old })
+
+	var gotTimeout time.Duration
+	var gotArgs []string
+	runRestartPaneBr = func(_ string, timeout time.Duration, args ...string) (string, error) {
+		gotTimeout = timeout
+		gotArgs = append([]string(nil), args...)
+		return `[{"title":"Fix assignment timeout"}]`, nil
+	}
+
+	prompt, err := buildBeadPromptWithTimeout("bd-vfufk", 10*time.Second)
+	if err != nil {
+		t.Fatalf("buildBeadPromptWithTimeout failed: %v", err)
+	}
+	if gotTimeout != 10*time.Second {
+		t.Fatalf("timeout = %v, want 10s", gotTimeout)
+	}
+	if strings.Join(gotArgs, " ") != "show bd-vfufk --json" {
+		t.Fatalf("args = %v, want br show args", gotArgs)
+	}
+	if !strings.Contains(prompt, "bd-vfufk") || !strings.Contains(prompt, "Fix assignment timeout") {
+		t.Fatalf("prompt %q did not include bead id and title", prompt)
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +28,7 @@ type BulkAssignOptions struct {
 	Stagger            time.Duration
 	SkipPanes          []int
 	PromptTemplatePath string
+	Timeout            time.Duration
 	// DefaultTemplatePath is a project/user-level configured template file
 	// (cfg.Assign.PromptTemplateFile). It is used when PromptTemplatePath is
 	// empty, and overrides DefaultTemplate and the built-in const.
@@ -120,6 +120,8 @@ type bulkPane struct {
 	Target    string
 }
 
+var runBulkAssignBr = bv.RunBdWithTimeout
+
 // GetBulkAssign generates the bulk assignment plan and returns the result.
 // This function returns the data struct directly, enabling CLI/REST parity.
 func GetBulkAssign(opts BulkAssignOptions) (*BulkAssignOutput, error) {
@@ -141,7 +143,7 @@ func GetBulkAssign(opts BulkAssignOptions) (*BulkAssignOutput, error) {
 		return output, nil
 	}
 
-	deps := bulkAssignDeps(opts.Deps)
+	deps := bulkAssignDeps(opts.Deps, opts.Timeout)
 	strategy := normalizeBulkAssignStrategy(opts.Strategy)
 	output.Strategy = strategy
 	output.Timestamp = deps.Now().UTC()
@@ -225,7 +227,12 @@ func PrintBulkAssign(opts BulkAssignOptions) error {
 	return encodeJSON(output)
 }
 
-func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
+func bulkAssignDeps(custom *BulkAssignDependencies, timeouts ...time.Duration) BulkAssignDependencies {
+	timeout := bv.DefaultTimeout
+	if len(timeouts) > 0 && timeouts[0] > 0 {
+		timeout = timeouts[0]
+	}
+
 	deps := BulkAssignDependencies{
 		FetchTriage:      bv.GetTriage,
 		FetchInProgress:  func(dir string, limit int) ([]bv.BeadInProgress, error) { return bv.GetInProgressList(dir, limit), nil },
@@ -233,10 +240,14 @@ func bulkAssignDeps(custom *BulkAssignDependencies) BulkAssignDependencies {
 		SendKeys:         tmux.SendKeys,
 		SendKeysForAgent: tmux.SendKeysForAgent,
 		ReadFile:         os.ReadFile,
-		FetchBeadTitle:   fetchBeadTitle,
-		FetchBeadDetails: fetchBeadDetails,
-		Now:              time.Now,
-		Cwd:              os.Getwd,
+		FetchBeadTitle: func(dir, beadID string) (string, error) {
+			return fetchBeadTitleWithTimeout(dir, beadID, timeout)
+		},
+		FetchBeadDetails: func(dir, beadID string) (BeadDetails, error) {
+			return fetchBeadDetailsWithTimeout(dir, beadID, timeout)
+		},
+		Now: time.Now,
+		Cwd: os.Getwd,
 	}
 
 	if custom == nil {
@@ -870,7 +881,11 @@ func decodeBulkAssignTriage(raw []byte) (*bv.TriageResponse, error) {
 }
 
 func fetchBeadTitle(dir, beadID string) (string, error) {
-	details, err := fetchBeadDetails(dir, beadID)
+	return fetchBeadTitleWithTimeout(dir, beadID, bv.DefaultTimeout)
+}
+
+func fetchBeadTitleWithTimeout(dir, beadID string, timeout time.Duration) (string, error) {
+	details, err := fetchBeadDetailsWithTimeout(dir, beadID, timeout)
 	if err != nil {
 		return "", err
 	}
@@ -878,9 +893,14 @@ func fetchBeadTitle(dir, beadID string) (string, error) {
 }
 
 func fetchBeadDetails(dir, beadID string) (BeadDetails, error) {
-	cmd := exec.Command("br", "show", beadID, "--json")
-	cmd.Dir = dir
-	output, err := cmd.Output()
+	return fetchBeadDetailsWithTimeout(dir, beadID, bv.DefaultTimeout)
+}
+
+func fetchBeadDetailsWithTimeout(dir, beadID string, timeout time.Duration) (BeadDetails, error) {
+	if timeout <= 0 {
+		timeout = bv.DefaultTimeout
+	}
+	output, err := runBulkAssignBr(dir, timeout, "show", beadID, "--json")
 	if err != nil {
 		return BeadDetails{}, fmt.Errorf("br show %s failed: %w", beadID, err)
 	}
@@ -893,7 +913,7 @@ func fetchBeadDetails(dir, beadID string) (BeadDetails, error) {
 			DepType string `json:"dep_type"`
 		} `json:"dependencies"`
 	}
-	if err := json.Unmarshal(output, &issues); err != nil {
+	if err := json.Unmarshal([]byte(output), &issues); err != nil {
 		return BeadDetails{}, fmt.Errorf("parse br show output: %w", err)
 	}
 	if len(issues) == 0 || issues[0].Title == "" {

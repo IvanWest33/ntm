@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/process"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -43,6 +43,7 @@ type RestartPaneOptions struct {
 	DryRun  bool     // Preview mode
 	Bead    string   // Bead ID to assign after restart (fetches info via br show --json)
 	Prompt  string   // Custom prompt to send after restart (overrides --bead template)
+	Timeout time.Duration
 }
 
 type restartPromptTarget struct {
@@ -50,6 +51,8 @@ type restartPromptTarget struct {
 	Target    string
 	AgentType tmux.AgentType
 }
+
+var runRestartPaneBr = bv.RunBdWithTimeout
 
 // GetRestartPane restarts panes (respawn-pane -k) and returns the result.
 // This function returns the data struct directly, enabling CLI/REST parity.
@@ -65,7 +68,7 @@ func GetRestartPane(opts RestartPaneOptions) (*RestartPaneOutput, error) {
 	// If --bead is provided, validate it before restarting anything
 	var beadPrompt string
 	if opts.Bead != "" {
-		prompt, err := buildBeadPrompt(opts.Bead)
+		prompt, err := buildBeadPromptWithTimeout(opts.Bead, opts.Timeout)
 		if err != nil {
 			output.RobotResponse = NewErrorResponse(
 				err,
@@ -261,9 +264,15 @@ const restartPaneBeadPromptTemplate = "Read AGENTS.md, register with Agent Mail.
 
 // buildBeadPrompt fetches bead info via br show --json and builds the assignment prompt.
 func buildBeadPrompt(beadID string) (string, error) {
-	cmd := exec.Command("br", "show", beadID, "--json")
-	cmd.Dir, _ = os.Getwd()
-	out, err := cmd.Output()
+	return buildBeadPromptWithTimeout(beadID, bv.DefaultTimeout)
+}
+
+func buildBeadPromptWithTimeout(beadID string, timeout time.Duration) (string, error) {
+	if timeout <= 0 {
+		timeout = bv.DefaultTimeout
+	}
+	wd, _ := os.Getwd()
+	out, err := runRestartPaneBr(wd, timeout, "show", beadID, "--json")
 	if err != nil {
 		return "", fmt.Errorf("br show %s failed: %w", beadID, err)
 	}
@@ -271,7 +280,7 @@ func buildBeadPrompt(beadID string) (string, error) {
 	var issues []struct {
 		Title string `json:"title"`
 	}
-	if err := json.Unmarshal(out, &issues); err != nil {
+	if err := json.Unmarshal([]byte(out), &issues); err != nil {
 		return "", fmt.Errorf("parse br show output: %w", err)
 	}
 	if len(issues) == 0 || issues[0].Title == "" {

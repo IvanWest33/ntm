@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -39,6 +40,41 @@ func TestDecodeBulkAssignTriageInvalid(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unexpected end") {
 		t.Logf("invalid JSON error: %v", err)
+	}
+}
+
+func TestFetchBeadDetailsWithTimeoutUsesRunBdTimeout(t *testing.T) {
+	old := runBulkAssignBr
+	t.Cleanup(func() { runBulkAssignBr = old })
+
+	var gotDir string
+	var gotTimeout time.Duration
+	var gotArgs []string
+	runBulkAssignBr = func(dir string, timeout time.Duration, args ...string) (string, error) {
+		gotDir = dir
+		gotTimeout = timeout
+		gotArgs = append([]string(nil), args...)
+		return `[{"title":"Ready bead","issue_type":"task","dependencies":[{"id":"bd-parent","dep_type":"blocks"},{"id":"bd-ignored","dep_type":"blocked_by"}]}]`, nil
+	}
+
+	details, err := fetchBeadDetailsWithTimeout("/repo", "bd-child", 10*time.Second)
+	if err != nil {
+		t.Fatalf("fetchBeadDetailsWithTimeout failed: %v", err)
+	}
+	if gotDir != "/repo" {
+		t.Fatalf("dir = %q, want /repo", gotDir)
+	}
+	if gotTimeout != 10*time.Second {
+		t.Fatalf("timeout = %v, want 10s", gotTimeout)
+	}
+	if !reflect.DeepEqual(gotArgs, []string{"show", "bd-child", "--json"}) {
+		t.Fatalf("args = %v, want br show args", gotArgs)
+	}
+	if details.Title != "Ready bead" || details.Type != "task" {
+		t.Fatalf("details = %+v, want title/type parsed", details)
+	}
+	if !reflect.DeepEqual(details.Dependencies, []string{"bd-parent"}) {
+		t.Fatalf("dependencies = %v, want only blocking deps", details.Dependencies)
 	}
 }
 
@@ -216,6 +252,28 @@ func TestBulkAssignTemplateLoadingFromFile(t *testing.T) {
 	t.Logf("loaded template=%q", template)
 	if !strings.Contains(template, "{bead_id}") {
 		t.Fatalf("expected template to contain {bead_id}, got %q", template)
+	}
+}
+
+func TestFetchBeadDetailsWithTimeoutBoundsBrShow(t *testing.T) {
+	binDir := t.TempDir()
+	brPath := filepath.Join(binDir, "br")
+	if err := os.WriteFile(brPath, []byte("#!/bin/sh\nexec sleep 2\n"), 0o755); err != nil {
+		t.Fatalf("write fake br: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	start := time.Now()
+	_, err := fetchBeadDetailsWithTimeout(t.TempDir(), "bd-timeout", 20*time.Millisecond)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("fetchBeadDetailsWithTimeout returned nil error for sleeping br")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("error = %q, want timeout", err.Error())
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("fetchBeadDetailsWithTimeout took %s, want bounded timeout", elapsed)
 	}
 }
 

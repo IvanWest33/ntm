@@ -1625,6 +1625,11 @@ Shell Integration:
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
+			timeout, err := resolveRobotOperationTimeout(cmd)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: invalid --timeout: %v\n", err)
+				os.Exit(1)
+			}
 			var skipPanes []int
 			if robotBulkAssignSkip != "" {
 				for _, p := range strings.Split(robotBulkAssignSkip, ",") {
@@ -1641,6 +1646,7 @@ Shell Integration:
 				DryRun:             robotDryRunEffective,
 				SkipPanes:          skipPanes,
 				PromptTemplatePath: robotBulkAssignTemplate,
+				Timeout:            timeout,
 			}
 			// Project/user-level default dispatch template (#153). A per-invocation
 			// --bulk-assign-template still wins; these only fill the gap the built-in
@@ -1753,6 +1759,11 @@ Shell Integration:
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
+			timeout, err := resolveRobotOperationTimeout(cmd)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: invalid --timeout: %v\n", err)
+				os.Exit(1)
+			}
 			// Parse pane filter (reuse --panes flag)
 			var paneFilter []string
 			if robotPanes != "" {
@@ -1766,6 +1777,7 @@ Shell Integration:
 				DryRun:  robotDryRunEffective,
 				Bead:    robotRestartPaneBead,
 				Prompt:  robotRestartPanePrompt,
+				Timeout: timeout,
 			}
 			if err := robot.PrintRestartPane(opts); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -4298,6 +4310,16 @@ func resolveRobotInterruptForce(cmd *cobra.Command) bool {
 
 func resolveRobotInterruptTimeout(cmd *cobra.Command) string {
 	return resolveRobotSharedFlag(cmd, "interrupt-timeout", robotInterruptTimeout, "timeout", robotWaitTimeout)
+}
+
+func resolveRobotOperationTimeout(cmd *cobra.Command) (time.Duration, error) {
+	if cmd == nil {
+		return 0, nil
+	}
+	if !cmd.Flags().Changed("timeout") && !cmd.Flags().Changed("wait-timeout") {
+		return 0, nil
+	}
+	return util.ParseDurationWithDefault(robotWaitTimeout, time.Millisecond, "timeout")
 }
 
 func resolveRobotAgentHealthVerbose(cmd *cobra.Command) bool {
