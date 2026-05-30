@@ -232,6 +232,51 @@ func TestFilterAssignedReadyBeadsRejectsActiveStoreItems(t *testing.T) {
 	}
 }
 
+func TestGetBeadBlockersWithTimeoutPassesCallerBudget(t *testing.T) {
+	orig := assignTriageRecommendations
+	t.Cleanup(func() { assignTriageRecommendations = orig })
+
+	var gotTimeout time.Duration
+	assignTriageRecommendations = func(dir string, n int, timeout time.Duration) ([]bv.TriageRecommendation, error) {
+		gotTimeout = timeout
+		return []bv.TriageRecommendation{
+			{ID: "bd-thin", BlockedBy: []string{"bd-parent"}},
+		}, nil
+	}
+
+	blockers, err := getBeadBlockersWithTimeout("bd-thin", 42*time.Millisecond)
+	if err != nil {
+		t.Fatalf("getBeadBlockersWithTimeout returned error: %v", err)
+	}
+	if gotTimeout != 42*time.Millisecond {
+		t.Fatalf("timeout passed to triage = %v, want 42ms", gotTimeout)
+	}
+	if len(blockers) != 1 || blockers[0] != "bd-parent" {
+		t.Fatalf("blockers = %v, want [bd-parent]", blockers)
+	}
+}
+
+func TestGetBeadTitleWithTimeoutPassesCallerBudget(t *testing.T) {
+	orig := assignTriageRecommendations
+	t.Cleanup(func() { assignTriageRecommendations = orig })
+
+	var gotTimeout time.Duration
+	assignTriageRecommendations = func(dir string, n int, timeout time.Duration) ([]bv.TriageRecommendation, error) {
+		gotTimeout = timeout
+		return []bv.TriageRecommendation{
+			{ID: "bd-thin", Title: "Thin assignment timeout"},
+		}, nil
+	}
+
+	title := getBeadTitleWithTimeout("bd-thin", 37*time.Millisecond)
+	if gotTimeout <= 0 || gotTimeout > 37*time.Millisecond {
+		t.Fatalf("timeout passed to triage = %v, want within 37ms caller budget", gotTimeout)
+	}
+	if title != "Thin assignment timeout" {
+		t.Fatalf("title = %q, want Thin assignment timeout", title)
+	}
+}
+
 // TestBlockedBeadsReasonString tests that blocked reason string is correct
 func TestBlockedBeadsReasonString(t *testing.T) {
 	const expectedReason = "blocked_by_dependency"

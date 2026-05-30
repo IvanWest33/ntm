@@ -58,6 +58,23 @@ func workspaceBDMutex(dir string) *sync.Mutex {
 	return mu
 }
 
+func acquireWorkspaceBDMutex(mu *sync.Mutex, deadline time.Time, timeout time.Duration) (func(), error) {
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("br timed out after %v waiting for local br run lock", timeout)
+		}
+		if mu.TryLock() {
+			return mu.Unlock, nil
+		}
+		sleep := 10 * time.Millisecond
+		if remaining < sleep {
+			sleep = remaining
+		}
+		time.Sleep(sleep)
+	}
+}
+
 // IsInstalled checks if bv is available in PATH
 func IsInstalled() bool {
 	_, err := exec.LookPath("bv")
@@ -139,7 +156,13 @@ func runWithTimeout(dir string, timeout time.Duration, args ...string) (string, 
 
 // GetInsights returns graph analysis insights (bottlenecks, keystones, etc.)
 func GetInsights(dir string) (*InsightsResponse, error) {
-	output, err := run(dir, "--robot-insights")
+	return GetInsightsWithTimeout(dir, DefaultTimeout)
+}
+
+// GetInsightsWithTimeout returns graph analysis insights using the caller's
+// timeout budget for the underlying bv invocation.
+func GetInsightsWithTimeout(dir string, timeout time.Duration) (*InsightsResponse, error) {
+	output, err := runWithTimeout(dir, timeout, "--robot-insights")
 	if err != nil {
 		return nil, err
 	}
@@ -715,6 +738,15 @@ func HasLocalBeadsDB(dir string) bool {
 // If br reports a missing database and suggests `--no-db`, it retries once with `--no-db`
 // and caches that preference for the remainder of the process.
 func RunBd(dir string, args ...string) (string, error) {
+	return RunBdWithTimeout(dir, DefaultTimeout, args...)
+}
+
+// RunBdWithTimeout executes br with an overall caller-scoped timeout.
+func RunBdWithTimeout(dir string, timeout time.Duration, args ...string) (string, error) {
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+
 	// Normalize dir to ensure consistent cache keys.
 	normalizedDir, err := normalizeTriageDir(dir)
 	if err != nil {
@@ -722,12 +754,16 @@ func RunBd(dir string, args ...string) (string, error) {
 	}
 	dir = normalizedDir
 	args = append([]string(nil), args...)
+	deadline := time.Now().Add(timeout)
 
 	// br's SQLite-backed workspace can self-contend when a single ntm process
 	// launches multiple br subprocesses against the same directory in parallel.
 	mu := workspaceBDMutex(dir)
-	mu.Lock()
-	defer mu.Unlock()
+	releaseBDLock, err := acquireWorkspaceBDMutex(mu, deadline, timeout)
+	if err != nil {
+		return "", err
+	}
+	defer releaseBDLock()
 
 	// Check cache for this specific directory
 	if getNoDBState(dir) && !containsString(args, "--no-db") {
@@ -739,7 +775,11 @@ func RunBd(dir string, args ...string) (string, error) {
 
 	const maxAttempts = 6 // Canonical default: config.RetryConfig.DB.MaxAttempts
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), DefaultTimeout)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return "", fmt.Errorf("br timed out after %v", timeout)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), remaining)
 
 		cmd := exec.CommandContext(ctx, "br", args...)
 		cmd.WaitDelay = time.Second // Prevent hanging on open pipes
@@ -754,7 +794,7 @@ func RunBd(dir string, args ...string) (string, error) {
 			return strings.TrimSpace(stdout.String()), nil
 		}
 		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("br timed out after %v", DefaultTimeout)
+			return "", fmt.Errorf("br timed out after %v", timeout)
 		}
 
 		stdoutStr := stdout.String()
@@ -771,7 +811,11 @@ func RunBd(dir string, args ...string) (string, error) {
 			continue
 		}
 		if attempt < maxAttempts && isTransientBeadsDBError(stderrStr, stdoutStr) {
-			time.Sleep(transientBeadsDBBackoff(attempt))
+			backoff := transientBeadsDBBackoff(attempt)
+			if time.Until(deadline) <= backoff {
+				return "", fmt.Errorf("br timed out after %v", timeout)
+			}
+			time.Sleep(backoff)
 			continue
 		}
 		return "", fmt.Errorf("br %s: %w: %s", strings.Join(args, " "), err, diagnostics)
@@ -1011,9 +1055,14 @@ func GetBeadsSummary(dir string, limit int) *BeadsSummary {
 
 // GetReadyPreview returns top N ready beads sorted by priority
 func GetReadyPreview(dir string, limit int) []BeadPreview {
+	return GetReadyPreviewWithTimeout(dir, limit, DefaultTimeout)
+}
+
+// GetReadyPreviewWithTimeout returns top ready beads using a caller-scoped br timeout.
+func GetReadyPreviewWithTimeout(dir string, limit int, timeout time.Duration) []BeadPreview {
 	var previews []BeadPreview
 
-	output, err := RunBd(dir, "ready", "--json")
+	output, err := RunBdWithTimeout(dir, timeout, "ready", "--json")
 	if err != nil {
 		return previews
 	}

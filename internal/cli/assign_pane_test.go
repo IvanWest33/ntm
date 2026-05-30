@@ -417,6 +417,7 @@ func TestDirectAssignErrorCodes(t *testing.T) {
 		{"INVALID_ARGS", "Invalid arguments (e.g., wrong number of beads)"},
 		{"SEND_ERROR", "Failed to send prompt to pane"},
 		{"TMUX_ERROR", "Tmux operation failed"},
+		{"TIMEOUT", "Assignment timeout budget exhausted"},
 	}
 
 	for _, ec := range errorCodes {

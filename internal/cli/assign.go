@@ -88,6 +88,7 @@ var (
 const assignWatchOverlayKey = "F12"
 
 var collectAssignAllocationPressure = collectLiveAssignAllocationPressure
+var assignTriageRecommendations = bv.GetTriageRecommendationsWithTimeout
 
 // assignAgentInfo holds information about an agent pane for assignment matching
 type assignAgentInfo struct {
@@ -675,6 +676,21 @@ func resolveAssignTimeout(timeout time.Duration) time.Duration {
 	return 30 * time.Second
 }
 
+func assignTimeoutDeadline(timeout time.Duration) time.Time {
+	return time.Now().Add(resolveAssignTimeout(timeout))
+}
+
+func remainingAssignTimeout(deadline time.Time) time.Duration {
+	if deadline.IsZero() {
+		return resolveAssignTimeout(0)
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0
+	}
+	return remaining
+}
+
 // AssignCommandOptions holds all options for the assign command
 type AssignCommandOptions struct {
 	Session         string
@@ -839,7 +855,7 @@ func getAssignOutput(opts robot.AssignOptions) (*robot.AssignOutput, error) {
 
 	// Get beads from bv
 	wd, _ := os.Getwd()
-	readyBeads := bv.GetReadyPreview(wd, 50)
+	readyBeads := bv.GetReadyPreviewWithTimeout(wd, 50, resolveAssignTimeout(assignTimeout))
 
 	// Filter to specific beads if requested
 	if len(opts.Beads) > 0 {
@@ -1526,6 +1542,7 @@ func getAssignOutputEnhanced(opts *AssignCommandOptions) (*AssignOutputEnhanced,
 	if !tmux.SessionExists(opts.Session) {
 		return nil, fmt.Errorf("session '%s' not found", opts.Session)
 	}
+	deadline := assignTimeoutDeadline(opts.Timeout)
 
 	// Get panes from tmux
 	panes, err := tmux.GetPanes(opts.Session)
@@ -1564,7 +1581,7 @@ func getAssignOutputEnhanced(opts *AssignCommandOptions) (*AssignOutputEnhanced,
 
 	// Get beads from bv using triage recommendations for dependency awareness
 	wd, _ := os.Getwd()
-	allRecs, err := bv.GetTriageRecommendations(wd, 100)
+	allRecs, err := assignTriageRecommendations(wd, 100, remainingAssignTimeout(deadline))
 
 	// Enhanced error handling for BV unavailability and stale graphs
 	var readyBeads []bv.BeadPreview
@@ -1582,36 +1599,41 @@ func getAssignOutputEnhanced(opts *AssignCommandOptions) (*AssignOutputEnhanced,
 			fmt.Fprintf(os.Stderr, "[DEP] %s, attempting fallbacks\n", fallbackReason)
 		}
 
-		// Fallback 1: Try BV insights to at least get cycle information
-		cycles, cycleErr := CheckCycles(false)
-		if cycleErr == nil && len(cycles) > 0 {
-			if opts.Verbose {
-				fmt.Fprintf(os.Stderr, "[DEP] Got cycle info from BV insights, filtering %d cycles\n", len(cycles))
+		var cycles [][]string
+		if remaining := remainingAssignTimeout(deadline); remaining > 0 {
+			// Fallback 1: Try BV insights to at least get cycle information
+			var cycleErr error
+			cycles, cycleErr = CheckCyclesWithTimeout(false, remaining)
+			if cycleErr == nil && len(cycles) > 0 {
+				if opts.Verbose {
+					fmt.Fprintf(os.Stderr, "[DEP] Got cycle info from BV insights, filtering %d cycles\n", len(cycles))
+				}
 			}
 		}
 
-		// Fallback 2: Use GetReadyPreview (no dependency info)
-		readyBeads = bv.GetReadyPreview(wd, 50)
-		if len(readyBeads) == 0 {
-			if opts.Verbose {
-				fmt.Fprintf(os.Stderr, "[DEP] No beads available from br list either\n")
+		if remaining := remainingAssignTimeout(deadline); remaining > 0 {
+			// Fallback 2: Use GetReadyPreview (no dependency info)
+			readyBeads = bv.GetReadyPreviewWithTimeout(wd, 50, remaining)
+			if len(readyBeads) == 0 {
+				if opts.Verbose {
+					fmt.Fprintf(os.Stderr, "[DEP] No beads available from br list either\n")
+				}
 			}
 		}
 
 		// Apply cycle filtering to fallback beads if we have cycle info
 		if len(cycles) > 0 {
-			filteredBeads, excluded := FilterCyclicBeads(readyBeads, false)
-			for i := 0; i < excluded; i++ {
-				// Add excluded beads to skipped list
-				for _, bead := range readyBeads {
-					if IsBeadInCycle(bead.ID, cycles) {
-						skippedBeads = append(skippedBeads, SkippedItem{
-							BeadID: bead.ID,
-							Reason: "in_dependency_cycle",
-						})
-						break
-					}
+			var filteredBeads []bv.BeadPreview
+			for _, bead := range readyBeads {
+				if IsBeadInCycle(bead.ID, cycles) {
+					skippedBeads = append(skippedBeads, SkippedItem{
+						BeadID:    bead.ID,
+						BeadTitle: bead.Title,
+						Reason:    "in_dependency_cycle",
+					})
+					continue
 				}
+				filteredBeads = append(filteredBeads, bead)
 			}
 			readyBeads = filteredBeads
 		}
@@ -1652,7 +1674,10 @@ func getAssignOutputEnhanced(opts *AssignCommandOptions) (*AssignOutputEnhanced,
 	// Filter out beads in dependency cycles (with warning)
 	var cycleWarnings int
 	var cyclicBeads []SkippedItem
-	cycles, _ := CheckCycles(false)
+	var cycles [][]string
+	if remaining := remainingAssignTimeout(deadline); remaining > 0 {
+		cycles, _ = CheckCyclesWithTimeout(false, remaining)
+	}
 	if len(cycles) > 0 {
 		var nonCyclic []bv.BeadPreview
 		for _, bead := range readyBeads {
@@ -3696,9 +3721,15 @@ func GetNewlyUnblockedBeads(completedBeadID string, verbose bool) (*DependencyAw
 		maxRetries, _ = cfg.Retry.RetryPolicyFor("assign")
 	}
 	var lastErr error
+	deadline := assignTimeoutDeadline(assignTimeout)
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		recommendations, lastErr = bv.GetTriageRecommendations(wd, 100)
+		remaining := remainingAssignTimeout(deadline)
+		if remaining <= 0 {
+			lastErr = fmt.Errorf("bv triage timed out after %v", resolveAssignTimeout(assignTimeout))
+			break
+		}
+		recommendations, lastErr = assignTriageRecommendations(wd, 100, remaining)
 		if lastErr == nil {
 			break
 		}
@@ -3709,7 +3740,11 @@ func GetNewlyUnblockedBeads(completedBeadID string, verbose bool) (*DependencyAw
 		}
 
 		// Brief delay before retry
-		time.Sleep(time.Duration(attempt+1) * time.Second)
+		backoff := time.Duration(attempt+1) * time.Second
+		if remainingAssignTimeout(deadline) <= backoff {
+			break
+		}
+		time.Sleep(backoff)
 	}
 
 	if lastErr != nil {
@@ -3724,12 +3759,14 @@ func GetNewlyUnblockedBeads(completedBeadID string, verbose bool) (*DependencyAw
 
 		// Alternative: Check if we can at least validate that the completed bead exists
 		// and try to infer potential unblocks from available data
-		fallbackBeads := bv.GetReadyPreview(wd, 50)
-		if len(fallbackBeads) > 0 {
-			if verbose {
-				fmt.Fprintf(os.Stderr, "[DEP] Found %d ready beads, but cannot determine dependencies\n", len(fallbackBeads))
+		if remaining := remainingAssignTimeout(deadline); remaining > 0 {
+			fallbackBeads := bv.GetReadyPreviewWithTimeout(wd, 50, remaining)
+			if len(fallbackBeads) > 0 {
+				if verbose {
+					fmt.Fprintf(os.Stderr, "[DEP] Found %d ready beads, but cannot determine dependencies\n", len(fallbackBeads))
+				}
+				result.Errors = append(result.Errors, "dependency information unavailable - manual verification recommended")
 			}
-			result.Errors = append(result.Errors, "dependency information unavailable - manual verification recommended")
 		}
 
 		return result, nil // Return partial result, not error
@@ -3862,15 +3899,23 @@ func OnBeadCompletion(session string, completedBeadID string, verbose bool) ([]b
 // Beads in cycles should be excluded from automatic assignment.
 // Enhanced with retry logic and comprehensive error handling.
 func CheckCycles(verbose bool) ([][]string, error) {
+	return CheckCyclesWithTimeout(verbose, assignTimeout)
+}
+
+func CheckCyclesWithTimeout(verbose bool, timeout time.Duration) ([][]string, error) {
 	wd, _ := os.Getwd()
-	client := bv.NewBVClient()
-	client.WorkspacePath = wd
+	deadline := assignTimeoutDeadline(timeout)
 
 	maxRetries := 2 // Lower than default for non-critical cycle check
 	var insights *bv.Insights
 	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
+		remaining := remainingAssignTimeout(deadline)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("bv insights timed out after %v", resolveAssignTimeout(timeout))
+		}
+		client := bv.NewBVClientWithOptions(wd, 0, remaining)
 		insights, lastErr = client.GetInsights()
 		if lastErr == nil {
 			break
@@ -3882,7 +3927,11 @@ func CheckCycles(verbose bool) ([][]string, error) {
 		}
 
 		// Brief delay before retry
-		time.Sleep(500 * time.Millisecond * time.Duration(attempt+1))
+		backoff := 500 * time.Millisecond * time.Duration(attempt+1)
+		if remainingAssignTimeout(deadline) <= backoff {
+			break
+		}
+		time.Sleep(backoff)
 	}
 
 	if lastErr != nil {
@@ -3958,7 +4007,11 @@ func IsBeadInCycle(beadID string, cycles [][]string) bool {
 
 // FilterCyclicBeads removes beads that are part of dependency cycles from the list.
 func FilterCyclicBeads(beads []bv.BeadPreview, verbose bool) ([]bv.BeadPreview, int) {
-	cycles, err := CheckCycles(false) // Don't log twice if verbose
+	return FilterCyclicBeadsWithTimeout(beads, verbose, assignTimeout)
+}
+
+func FilterCyclicBeadsWithTimeout(beads []bv.BeadPreview, verbose bool, timeout time.Duration) ([]bv.BeadPreview, int) {
+	cycles, err := CheckCyclesWithTimeout(false, timeout) // Don't log twice if verbose
 	if err != nil || len(cycles) == 0 {
 		return beads, 0
 	}
@@ -4085,6 +4138,14 @@ func makeDirectAssignEnvelope(session string, success bool, data *DirectAssignDa
 func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) error {
 	var warnings []string
 	now := time.Now().UTC().Format(time.RFC3339)
+	deadline := assignTimeoutDeadline(opts.Timeout)
+	timeoutErr := func(data *DirectAssignData) error {
+		errMsg := fmt.Sprintf("assignment timed out after %v", resolveAssignTimeout(opts.Timeout))
+		if IsJSONOutput() {
+			return json.NewEncoder(os.Stdout).Encode(makeDirectAssignEnvelope(opts.Session, false, data, "TIMEOUT", errMsg, warnings))
+		}
+		return fmt.Errorf("%s", errMsg)
+	}
 
 	// Validate: exactly one bead must be specified
 	if len(opts.BeadIDs) != 1 {
@@ -4161,10 +4222,17 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 
 	// Check dependencies (unless --ignore-deps)
 	if !opts.IgnoreDeps {
-		blockers, err := getBeadBlockers(beadID)
+		remaining := remainingAssignTimeout(deadline)
+		if remaining <= 0 {
+			return timeoutErr(&DirectAssignData{Assignment: assignItem})
+		}
+		blockers, err := getBeadBlockersWithTimeout(beadID, remaining)
 		if err != nil && opts.Verbose {
 			fmt.Fprintf(os.Stderr, "[DEP] Warning: could not check dependencies: %v\n", err)
 			warnings = append(warnings, fmt.Sprintf("could not check dependencies: %v", err))
+		}
+		if err != nil && remainingAssignTimeout(deadline) <= 0 {
+			return timeoutErr(&DirectAssignData{Assignment: assignItem})
 		}
 		if len(blockers) > 0 {
 			assignItem.BlockedByIDs = blockers
@@ -4181,13 +4249,21 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 	}
 
 	// Get bead title
-	beadTitle := getBeadTitle(beadID)
+	remaining := remainingAssignTimeout(deadline)
+	if remaining <= 0 {
+		return timeoutErr(&DirectAssignData{Assignment: assignItem})
+	}
+	beadTitle := getBeadTitleWithTimeout(beadID, remaining)
 	assignItem.BeadTitle = beadTitle
 
 	// Reserve files via Agent Mail (if enabled)
 	var fileReservations *DirectAssignFileReservations
 	if opts.ReserveFiles {
-		reservationResult := reserveFilesForBead(opts.Session, beadID, beadTitle, agentType, opts.Verbose, opts.Timeout)
+		remaining := remainingAssignTimeout(deadline)
+		if remaining <= 0 {
+			return timeoutErr(&DirectAssignData{Assignment: assignItem})
+		}
+		reservationResult := reserveFilesForBead(opts.Session, beadID, beadTitle, agentType, opts.Verbose, remaining)
 		if reservationResult != nil {
 			// Compute denied paths (requested but not granted)
 			grantedSet := make(map[string]bool)
@@ -4206,6 +4282,9 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 				Denied:    deniedPaths,
 			}
 		}
+	}
+	if remainingAssignTimeout(deadline) <= 0 {
+		return timeoutErr(&DirectAssignData{Assignment: assignItem, FileReservations: fileReservations})
 	}
 
 	// Build prompt
@@ -4278,8 +4357,12 @@ func runDirectPaneAssignment(cmd *cobra.Command, opts *AssignCommandOptions) err
 
 // getBeadBlockers returns the list of beads blocking the given bead
 func getBeadBlockers(beadID string) ([]string, error) {
+	return getBeadBlockersWithTimeout(beadID, assignTimeout)
+}
+
+func getBeadBlockersWithTimeout(beadID string, timeout time.Duration) ([]string, error) {
 	wd, _ := os.Getwd()
-	recommendations, err := bv.GetTriageRecommendations(wd, 100)
+	recommendations, err := assignTriageRecommendations(wd, 100, resolveAssignTimeout(timeout))
 	if err != nil {
 		return nil, err
 	}
@@ -4295,20 +4378,35 @@ func getBeadBlockers(beadID string) ([]string, error) {
 
 // getBeadTitle retrieves the title for a bead
 func getBeadTitle(beadID string) string {
+	return getBeadTitleWithTimeout(beadID, assignTimeout)
+}
+
+func getBeadTitleWithTimeout(beadID string, timeout time.Duration) string {
 	wd, _ := os.Getwd()
-	recommendations, err := bv.GetTriageRecommendations(wd, 100)
-	if err != nil {
+	deadline := assignTimeoutDeadline(timeout)
+	remaining := remainingAssignTimeout(deadline)
+	if remaining <= 0 {
 		return ""
 	}
-
-	for _, rec := range recommendations {
-		if rec.ID == beadID {
-			return rec.Title
+	recommendations, err := assignTriageRecommendations(wd, 100, remaining)
+	if err != nil {
+		if remainingAssignTimeout(deadline) <= 0 {
+			return ""
+		}
+	} else {
+		for _, rec := range recommendations {
+			if rec.ID == beadID {
+				return rec.Title
+			}
 		}
 	}
 
 	// Fallback to ready preview
-	readyBeads := bv.GetReadyPreview(wd, 50)
+	remaining = remainingAssignTimeout(deadline)
+	if remaining <= 0 {
+		return ""
+	}
+	readyBeads := bv.GetReadyPreviewWithTimeout(wd, 50, remaining)
 	for _, b := range readyBeads {
 		if b.ID == beadID {
 			return b.Title
@@ -4885,7 +4983,7 @@ func (w *WatchLoop) shouldStop() bool {
 
 	// Check if there are ready beads
 	wd, _ := os.Getwd()
-	readyBeads := bv.GetReadyPreview(wd, 10)
+	readyBeads := bv.GetReadyPreviewWithTimeout(wd, 10, resolveAssignTimeout(w.opts.Timeout))
 	if len(readyBeads) > 0 {
 		return false // Still have work available
 	}

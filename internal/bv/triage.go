@@ -214,6 +214,21 @@ func GetTriageRecommendations(dir string, n int) ([]TriageRecommendation, error)
 	return recs, nil
 }
 
+// GetTriageRecommendationsWithTimeout returns top N recommendations using the
+// caller's timeout budget for the underlying bv --robot-triage invocation.
+func GetTriageRecommendationsWithTimeout(dir string, n int, timeout time.Duration) ([]TriageRecommendation, error) {
+	triage, err := GetTriageWithTimeout(dir, timeout)
+	if err != nil {
+		return nil, err
+	}
+
+	recs := triage.Triage.Recommendations
+	if len(recs) > n {
+		recs = recs[:n]
+	}
+	return recs, nil
+}
+
 // GetQuickWins returns quick win recommendations (low effort, high impact)
 func GetQuickWins(dir string, n int) ([]TriageRecommendation, error) {
 	triage, err := GetTriage(dir)

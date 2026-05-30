@@ -193,10 +193,22 @@ func (c *BVClient) GetInsights() (*Insights, error) {
 		return nil, err
 	}
 
-	insightsResp, err := GetInsights(workDir)
+	timeout := c.Timeout
+	if timeout <= 0 {
+		timeout = DefaultClientTimeout
+	}
+	deadline := time.Now().Add(timeout)
+	insightsResp, err := GetInsightsWithTimeout(workDir, timeout)
 	if err != nil {
 		// Fall back to triage data if insights fail
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("%w (fallback skipped: timeout budget exhausted)", err)
+		}
+		origTimeout := c.Timeout
+		c.Timeout = remaining
 		triage, triageErr := c.getTriage()
+		c.Timeout = origTimeout
 		if triageErr != nil {
 			// Return original error with context about fallback failure
 			return nil, fmt.Errorf("%w (fallback also failed: %v)", err, triageErr)

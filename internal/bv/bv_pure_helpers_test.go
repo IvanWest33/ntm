@@ -158,6 +158,49 @@ func TestGetTriageWithTimeoutIncludesRunLockWait(t *testing.T) {
 	}
 }
 
+func TestGetTriageRecommendationsWithTimeoutIncludesRunLockWait(t *testing.T) {
+	InvalidateTriageCache()
+	triageRunMu.Lock()
+	defer triageRunMu.Unlock()
+
+	start := time.Now()
+	_, err := GetTriageRecommendationsWithTimeout(t.TempDir(), 10, 20*time.Millisecond)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("GetTriageRecommendationsWithTimeout returned nil error while triage run lock was held")
+	}
+	if !strings.Contains(err.Error(), "bv timed out after 20ms") {
+		t.Fatalf("GetTriageRecommendationsWithTimeout error = %q, want timeout", err.Error())
+	}
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("GetTriageRecommendationsWithTimeout waited %s for held run lock, want bounded wait", elapsed)
+	}
+}
+
+func TestRunBdWithTimeoutIncludesLocalRunLockWait(t *testing.T) {
+	dir := t.TempDir()
+	normalizedDir, err := normalizeTriageDir(dir)
+	if err != nil {
+		t.Fatalf("normalizeTriageDir: %v", err)
+	}
+	mu := workspaceBDMutex(normalizedDir)
+	mu.Lock()
+	defer mu.Unlock()
+
+	start := time.Now()
+	_, err = RunBdWithTimeout(dir, 20*time.Millisecond, "ready", "--json")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("RunBdWithTimeout returned nil error while local br run lock was held")
+	}
+	if !strings.Contains(err.Error(), "br timed out after 20ms") {
+		t.Fatalf("RunBdWithTimeout error = %q, want timeout", err.Error())
+	}
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("RunBdWithTimeout waited %s for held local br run lock, want bounded wait", elapsed)
+	}
+}
+
 // =============================================================================
 // triage.go: IsCacheValid
 // =============================================================================
