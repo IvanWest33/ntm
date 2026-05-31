@@ -360,6 +360,9 @@ func extractMCPContent(result json.RawMessage) (json.RawMessage, error) {
 			if strings.Contains(msgLower, "busy") || strings.Contains(msgLower, "temporarily unavailable") {
 				return nil, fmt.Errorf("%w: %s", ErrTransientBusy, errMsg)
 			}
+			if strings.Contains(msgLower, "agent") && strings.Contains(msgLower, "retired") {
+				return nil, fmt.Errorf("%w: %s", ErrAgentRetired, errMsg)
+			}
 			return nil, fmt.Errorf("tool error: %s", errMsg)
 		}
 		return nil, fmt.Errorf("tool returned error")

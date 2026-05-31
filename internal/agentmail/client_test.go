@@ -349,6 +349,15 @@ func TestExtractMCPContent(t *testing.T) {
 			errContains: "Agent name already in use",
 		},
 		{
+			name: "MCP envelope maps retired agent error",
+			input: json.RawMessage(`{
+				"content": [{"type": "text", "text": "Agent ` + "`AzureTower`" + ` is retired and no longer accepts new messages"}],
+				"isError": true
+			}`),
+			wantErr:     true,
+			errContains: ErrAgentRetired.Error(),
+		},
+		{
 			name: "MCP envelope with isError=true no message",
 			input: json.RawMessage(`{
 				"content": [],

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -167,6 +168,71 @@ func TestAttachSenderToken_PassedThroughOnSendMessage(t *testing.T) {
 	}
 	if sawRegistrationToken.Load() {
 		t.Error("send_message must not receive registration_token; use sender_token")
+	}
+}
+
+func TestSendMessage_UnretiresCachedParticipantsAndRetries(t *testing.T) {
+	t.Parallel()
+
+	var sendCalls atomic.Int32
+	var mu sync.Mutex
+	unretiredTokens := map[string]string{}
+	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
+		"send_message": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
+			if sendCalls.Add(1) == 1 {
+				return nil, &JSONRPCError{
+					Code:    -32000,
+					Message: "Agent 'BlueLake' is retired and no longer accepts new messages",
+				}
+			}
+			return SendResult{
+				Deliveries: []MessageDelivery{{Project: "abs-project", Payload: &Message{ID: 56}}},
+				Count:      1,
+			}, nil
+		},
+		"unretire_agent": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
+			name, _ := args["agent_name"].(string)
+			token, _ := args["registration_token"].(string)
+			mu.Lock()
+			unretiredTokens[name] = token
+			mu.Unlock()
+			return AgentLifecycleResult{
+				Status:     "active",
+				AgentName:  name,
+				ProjectKey: "/abs/project",
+			}, nil
+		},
+	}))
+	defer server.Close()
+
+	c := NewClient(WithBaseURL(server.URL + "/"))
+	c.SetRegistrationToken("/abs/project", "GreenCastle", "TOK-SENDER")
+	c.SetRegistrationToken("/abs/project", "BlueLake", "TOK-TARGET")
+
+	result, err := c.SendMessage(context.Background(), SendMessageOptions{
+		ProjectKey: "/abs/project",
+		SenderName: "GreenCastle",
+		To:         []string{"BlueLake"},
+		Subject:    "Status",
+		BodyMD:     "Done.",
+	})
+	if err != nil {
+		t.Fatalf("send_message should retry after unretiring cached participants: %v", err)
+	}
+	if result.Count != 1 {
+		t.Errorf("count = %d, want 1", result.Count)
+	}
+	if got := sendCalls.Load(); got != 2 {
+		t.Errorf("send_message calls = %d, want 2", got)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got := unretiredTokens["GreenCastle"]; got != "TOK-SENDER" {
+		t.Errorf("sender unretire token = %q, want TOK-SENDER", got)
+	}
+	if got := unretiredTokens["BlueLake"]; got != "TOK-TARGET" {
+		t.Errorf("recipient unretire token = %q, want TOK-TARGET", got)
 	}
 }
 

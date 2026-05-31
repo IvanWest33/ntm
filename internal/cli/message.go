@@ -32,14 +32,14 @@ func newMessageCmd() *cobra.Command {
 
 func newMessageInboxCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "inbox",
+		Use:   "inbox [session]",
 		Short: "View unified inbox",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			projectDir, agentName, err := resolveMessageCommandScope()
+			projectDir, agentName, err := resolveMessageCommandScopeFromArgs(args)
 			if err != nil {
 				return err
 			}
-
 			amClient := newAgentMailClient(projectDir)
 			unified := agentmail.NewUnifiedMessenger(amClient, nil, projectDir, agentName)
 
@@ -76,7 +76,7 @@ func newMessageSendCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-
+			to = resolveMessageSendRecipient(to, projectDir, agentName)
 			amClient := newAgentMailClient(projectDir)
 			unified := agentmail.NewUnifiedMessenger(amClient, nil, projectDir, agentName)
 
@@ -101,7 +101,6 @@ This marks the message as read.`,
 			if err != nil {
 				return err
 			}
-
 			amClient := newAgentMailClient(projectDir)
 			unified := agentmail.NewUnifiedMessenger(amClient, nil, projectDir, agentName)
 
@@ -167,6 +166,26 @@ func resolveMessageScope(session string) (string, string, error) {
 
 func resolveMessageCommandScope() (string, string, error) {
 	return resolveMessageScopeForSession(tmux.GetCurrentSession(), true)
+}
+
+func resolveMessageCommandScopeFromArgs(args []string) (string, string, error) {
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		return resolveMessageScope(args[0])
+	}
+	return resolveMessageCommandScope()
+}
+
+func resolveMessageSendRecipient(to, projectDir, agentName string) string {
+	to = strings.TrimSpace(to)
+	projectDir = strings.TrimSpace(projectDir)
+	agentName = strings.TrimSpace(agentName)
+	if to == "" || projectDir == "" || agentName == "" {
+		return to
+	}
+	if to == projectDir || to == filepath.Base(projectDir) {
+		return agentName
+	}
+	return to
 }
 
 func resolveMessageScopeForSession(session string, inferredCurrentSession bool) (string, string, error) {

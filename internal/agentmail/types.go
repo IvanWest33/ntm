@@ -110,6 +110,13 @@ type Project struct {
 	CreatedAt FlexTime `json:"created_at"`
 }
 
+// AgentLifecycleResult captures retire/unretire responses from Agent Mail.
+type AgentLifecycleResult struct {
+	Status     string `json:"status"`
+	AgentName  string `json:"agent_name"`
+	ProjectKey string `json:"project_key"`
+}
+
 // FileReservation represents a file path reservation (advisory lock).
 type FileReservation struct {
 	ID          int       `json:"id"`

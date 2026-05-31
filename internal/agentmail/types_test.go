@@ -187,6 +187,7 @@ func TestMapJSONRPCError(t *testing.T) {
 		checkWith error // use errors.Is
 	}{
 		{"nil input", nil, true, nil},
+		{"agent retired", &JSONRPCError{Code: -32000, Message: "Agent 'AzureTower' is retired and no longer accepts new messages"}, false, ErrAgentRetired},
 		{"agent not registered", &JSONRPCError{Code: -32000, Message: "Agent not registered in project"}, false, ErrAgentNotRegistered},
 		{"message not found", &JSONRPCError{Code: -32000, Message: "Message not found"}, false, ErrMessageNotFound},
 		{"contact blocked", &JSONRPCError{Code: -32000, Message: "CONTACT_BLOCKED: target agent only accepts approved contacts"}, false, ErrContactBlocked},

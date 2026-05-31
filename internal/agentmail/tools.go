@@ -133,6 +133,28 @@ func (c *Client) CreateAgentIdentity(ctx context.Context, opts RegisterAgentOpti
 	return &agent, nil
 }
 
+// UnretireAgent restores a previously retired agent identity so it can receive
+// new messages again. Calling it for an already-active agent is safe on current
+// Agent Mail servers and returns status=active.
+func (c *Client) UnretireAgent(ctx context.Context, projectKey, agentName string) (*AgentLifecycleResult, error) {
+	args := map[string]interface{}{
+		"project_key": projectKey,
+		"agent_name":  agentName,
+	}
+	c.attachRegistrationToken(args)
+
+	result, err := c.callToolWithBusyRetry(ctx, "unretire_agent", args, 3*time.Second, 3)
+	if err != nil {
+		return nil, err
+	}
+
+	var lifecycle AgentLifecycleResult
+	if err := json.Unmarshal(result, &lifecycle); err != nil {
+		return nil, NewAPIError("unretire_agent", 0, err)
+	}
+	return &lifecycle, nil
+}
+
 // Whois retrieves agent profile details.
 func (c *Client) Whois(ctx context.Context, projectKey, agentName string, includeRecentCommits bool) (*Agent, error) {
 	args := map[string]interface{}{
@@ -156,6 +178,18 @@ func (c *Client) Whois(ctx context.Context, projectKey, agentName string, includ
 
 // SendMessage sends a message to one or more agents.
 func (c *Client) SendMessage(ctx context.Context, opts SendMessageOptions) (*SendResult, error) {
+	result, err := c.sendMessageOnce(ctx, opts)
+	if err == nil || !IsAgentRetired(err) {
+		return result, err
+	}
+
+	if c.unretireMessageParticipants(ctx, opts) {
+		return c.sendMessageOnce(ctx, opts)
+	}
+	return nil, err
+}
+
+func (c *Client) sendMessageOnce(ctx context.Context, opts SendMessageOptions) (*SendResult, error) {
 	args := map[string]interface{}{
 		"project_key": opts.ProjectKey,
 		"sender_name": opts.SenderName,
@@ -194,6 +228,47 @@ func (c *Client) SendMessage(ctx context.Context, opts SendMessageOptions) (*Sen
 	}
 
 	return &sendResult, nil
+}
+
+func (c *Client) unretireMessageParticipants(ctx context.Context, opts SendMessageOptions) bool {
+	if c == nil || opts.ProjectKey == "" {
+		return false
+	}
+
+	seen := make(map[string]struct{})
+	names := make([]string, 0, 1+len(opts.To)+len(opts.CC)+len(opts.BCC))
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	add(opts.SenderName)
+	for _, name := range opts.To {
+		add(name)
+	}
+	for _, name := range opts.CC {
+		add(name)
+	}
+	for _, name := range opts.BCC {
+		add(name)
+	}
+
+	revived := false
+	for _, name := range names {
+		if c.RegistrationToken(opts.ProjectKey, name) == "" {
+			continue
+		}
+		if _, err := c.UnretireAgent(ctx, opts.ProjectKey, name); err == nil {
+			revived = true
+		}
+	}
+	return revived
 }
 
 // ReplyMessage replies to an existing message.

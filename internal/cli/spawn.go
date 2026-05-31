@@ -3036,6 +3036,7 @@ func registerSpawnedAgents(workingDir, sessionName string, agents []spawnedAgent
 	if registry == nil {
 		registry = agentmail.NewSessionAgentRegistry(sessionName, workingDir)
 	}
+	registry.HydrateClientTokens(client)
 
 	// Ensure project exists
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -3058,30 +3059,42 @@ func registerSpawnedAgents(workingDir, sessionName string, agents []spawnedAgent
 
 	// Register each agent (reusing existing identities from prior sessions when possible)
 	for _, agent := range agents {
-		// Check if this pane already has an identity from a prior session (#69)
-		if existingName, ok := registry.GetAgent(agent.paneTitle, agent.paneID); ok && existingName != "" {
-			status.AgentsRegistered++
-			status.AgentMap[fmt.Sprintf("%d", agent.paneIndex)] = existingName
-			if !IsJSONOutput() {
-				output.PrintInfof("Reused existing identity for pane %d: %s", agent.paneIndex, existingName)
-			}
-			// Write canonical identity file (XDG-compliant, atomic, Agent-Mail-compatible).
-			if _, writeErr := agentmail.WriteIdentity(workingDir, agent.paneID, existingName); writeErr != nil {
-				if !IsJSONOutput() {
-					output.PrintWarningf("Failed to write canonical identity for pane %d: %v", agent.paneIndex, writeErr)
-				}
-			}
-			// Backward compat: also write to legacy /tmp/ location used by old notify hooks.
-			_ = agentmail.WriteLegacyCompatIdentity(workingDir, agent.paneID, existingName)
-			registry.AddAgent(agent.paneTitle, agent.paneID, existingName)
-			continue
-		}
-
 		// Map agent type to program name
 		program := agentTypeToProgram(agent.agentType)
 		model := agent.resolvedModel
 		if model == "" {
 			model = agent.model
+		}
+
+		// Check if this pane already has an identity from a prior session (#69)
+		if existingName, ok := registry.GetAgent(agent.paneTitle, agent.paneID); ok && existingName != "" {
+			registered, err := refreshReusedAgentIdentity(client, workingDir, existingName, program, model)
+			if err == nil && registered != nil && registered.Name != "" {
+				status.AgentsRegistered++
+				status.AgentMap[fmt.Sprintf("%d", agent.paneIndex)] = registered.Name
+				if !IsJSONOutput() {
+					output.PrintInfof("Reused existing identity for pane %d: %s", agent.paneIndex, registered.Name)
+				}
+				// Write canonical identity file (XDG-compliant, atomic, Agent-Mail-compatible).
+				if _, writeErr := agentmail.WriteIdentity(workingDir, agent.paneID, registered.Name); writeErr != nil {
+					if !IsJSONOutput() {
+						output.PrintWarningf("Failed to write canonical identity for pane %d: %v", agent.paneIndex, writeErr)
+					}
+				}
+				// Backward compat: also write to legacy /tmp/ location used by old notify hooks.
+				_ = agentmail.WriteLegacyCompatIdentity(workingDir, agent.paneID, registered.Name)
+				registry.AddAgent(agent.paneTitle, agent.paneID, registered.Name)
+				if registered.RegistrationToken != "" {
+					registry.SetRegistrationToken(registered.Name, registered.RegistrationToken)
+				}
+				continue
+			}
+			if err == nil {
+				err = fmt.Errorf("register_agent returned empty agent name")
+			}
+			if !IsJSONOutput() {
+				output.PrintWarningf("Agent Mail identity refresh failed for pane %d (%s): %v; creating replacement identity", agent.paneIndex, existingName, err)
+			}
 		}
 
 		regCtx, regCancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -3174,6 +3187,28 @@ func registerSpawnedAgents(workingDir, sessionName string, agents []spawnedAgent
 	}
 
 	return status
+}
+
+func refreshReusedAgentIdentity(client *agentmail.Client, projectKey, agentName, program, model string) (*agentmail.Agent, error) {
+	if client == nil {
+		return nil, fmt.Errorf("agent mail client is nil")
+	}
+
+	unretireCtx, unretireCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_, unretireErr := client.UnretireAgent(unretireCtx, projectKey, agentName)
+	unretireCancel()
+	if unretireErr != nil && !errors.Is(unretireErr, agentmail.ErrNotImplemented) {
+		return nil, unretireErr
+	}
+
+	registerCtx, registerCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer registerCancel()
+	return client.RegisterAgent(registerCtx, agentmail.RegisterAgentOptions{
+		ProjectKey: projectKey,
+		Program:    program,
+		Model:      model,
+		Name:       agentName,
+	})
 }
 
 // agentTypeToProgram maps NTM agent types to Agent Mail program names.

@@ -638,6 +638,45 @@ func TestResolveMessageScopeRejectsInvalidSessionName(t *testing.T) {
 	}
 }
 
+func TestResolveMessageCommandScopeFromArgsUsesExplicitSession(t *testing.T) {
+	isolateSessionAgentStorage(t)
+
+	projectsBase := t.TempDir()
+	projectDir := filepath.Join(projectsBase, "notaryware")
+	if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	saveSessionAgentForTest(t, "notaryware", projectDir, "PearlGlen")
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	gotDir, gotAgent, err := resolveMessageCommandScopeFromArgs([]string{"notaryware"})
+	if err != nil {
+		t.Fatalf("resolveMessageCommandScopeFromArgs() error = %v", err)
+	}
+	if gotDir != projectDir {
+		t.Fatalf("project dir = %q, want %q", gotDir, projectDir)
+	}
+	if gotAgent != "PearlGlen" {
+		t.Fatalf("agent name = %q, want PearlGlen", gotAgent)
+	}
+}
+
+func TestResolveMessageSendRecipientMapsProjectAliasToCurrentAgent(t *testing.T) {
+	projectDir := filepath.Join(t.TempDir(), "notaryware")
+
+	for _, to := range []string{projectDir, "notaryware"} {
+		if got := resolveMessageSendRecipient(to, projectDir, "PearlGlen"); got != "PearlGlen" {
+			t.Fatalf("recipient %q resolved to %q, want PearlGlen", to, got)
+		}
+	}
+	if got := resolveMessageSendRecipient("AzureTower", projectDir, "PearlGlen"); got != "AzureTower" {
+		t.Fatalf("direct agent recipient resolved to %q, want AzureTower", got)
+	}
+}
+
 func TestResolvePipelineProjectDirForSessionUsesSessionProjectDir(t *testing.T) {
 	projectsBase := t.TempDir()
 	projectDir := filepath.Join(projectsBase, "mysession")

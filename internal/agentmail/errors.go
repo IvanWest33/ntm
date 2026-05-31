@@ -30,6 +30,10 @@ var (
 	// ErrAgentNotRegistered is returned when trying to use an unregistered agent.
 	ErrAgentNotRegistered = errors.New("agent not registered")
 
+	// ErrAgentRetired is returned when trying to reach an agent that still
+	// exists in history but no longer accepts new messages.
+	ErrAgentRetired = errors.New("agent retired")
+
 	// ErrMessageNotFound is returned when a message ID doesn't exist.
 	ErrMessageNotFound = errors.New("message not found")
 
@@ -135,6 +139,11 @@ func IsTransientBusy(err error) bool {
 	return errors.Is(err, ErrTransientBusy)
 }
 
+// IsAgentRetired returns true if the error indicates a retired agent identity.
+func IsAgentRetired(err error) bool {
+	return errors.Is(err, ErrAgentRetired)
+}
+
 // mapJSONRPCError converts JSON-RPC error codes to Go errors.
 func mapJSONRPCError(rpcErr *JSONRPCError) error {
 	if rpcErr == nil {
@@ -144,6 +153,8 @@ func mapJSONRPCError(rpcErr *JSONRPCError) error {
 	// Map application-specific errors by message content (heuristic)
 	msg := strings.ToLower(rpcErr.Message)
 	switch {
+	case strings.Contains(msg, "agent") && strings.Contains(msg, "retired"):
+		return fmt.Errorf("%w: %s", ErrAgentRetired, rpcErr.Message)
 	case strings.Contains(msg, "agent not registered"):
 		return fmt.Errorf("%w: %s", ErrAgentNotRegistered, rpcErr.Message)
 	case strings.Contains(msg, "message not found"):

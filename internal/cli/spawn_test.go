@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/cm"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
@@ -49,6 +50,101 @@ func TestShouldSuperviseAgentMailDaemon_DefaultsExternal(t *testing.T) {
 	cfg.AgentMail.Enabled = false
 	if shouldSuperviseAgentMailDaemon() {
 		t.Fatal("agent_mail.enabled=false should disable Agent Mail supervision")
+	}
+}
+
+func TestRegisterSpawnedAgentsUnretiresAndRefreshesReusedIdentity(t *testing.T) {
+	isolateSessionAgentStorage(t)
+
+	projectDir := t.TempDir()
+	session := "spawnreuse"
+	registry := agentmail.NewSessionAgentRegistry(session, projectDir)
+	registry.AddAgent("pane-title", "%1", "AzureTower")
+	registry.SetRegistrationToken("AzureTower", "tok-old")
+	if err := agentmail.SaveSessionAgentRegistry(registry); err != nil {
+		t.Fatalf("save registry: %v", err)
+	}
+
+	var unretireArgs map[string]interface{}
+	var registerArgs map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req agentmail.JSONRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		params, _ := req.Params.(map[string]interface{})
+		toolName, _ := params["name"].(string)
+		args, _ := params["arguments"].(map[string]interface{})
+
+		var result interface{}
+		switch toolName {
+		case "health_check":
+			result = map[string]interface{}{"status": "ok"}
+		case "ensure_project":
+			result = map[string]interface{}{"id": 1, "slug": "spawnreuse", "human_key": args["human_key"]}
+		case "unretire_agent":
+			unretireArgs = args
+			result = map[string]interface{}{"status": "active", "agent_name": args["agent_name"], "project_key": args["project_key"]}
+		case "register_agent":
+			registerArgs = args
+			result = agentmail.Agent{
+				ID:                7,
+				Name:              "AzureTower",
+				Program:           "codex-cli",
+				Model:             "gpt-5.5",
+				RegistrationToken: "tok-new",
+			}
+		default:
+			t.Fatalf("unexpected tool %q", toolName)
+		}
+
+		payload, _ := json.Marshal(result)
+		_ = json.NewEncoder(w).Encode(agentmail.JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result:  payload,
+		})
+	}))
+	defer server.Close()
+
+	oldCfg := cfg
+	cfg = config.Default()
+	cfg.AgentMail.URL = server.URL + "/"
+	t.Cleanup(func() { cfg = oldCfg })
+
+	status := registerSpawnedAgents(projectDir, session, []spawnedAgentInfo{
+		{
+			paneIndex:     13,
+			paneID:        "%1",
+			paneTitle:     "pane-title",
+			agentType:     "cod",
+			model:         "gpt-5.5",
+			resolvedModel: "gpt-5.5",
+		},
+	})
+
+	if status == nil || !status.Available || status.AgentsRegistered != 1 || status.AgentsFailed != 0 {
+		t.Fatalf("unexpected status: %+v", status)
+	}
+	if unretireArgs["agent_name"] != "AzureTower" {
+		t.Fatalf("unretire agent_name = %v, want AzureTower", unretireArgs["agent_name"])
+	}
+	if unretireArgs["registration_token"] != "tok-old" {
+		t.Fatalf("unretire registration_token = %v, want tok-old", unretireArgs["registration_token"])
+	}
+	if registerArgs["name"] != "AzureTower" {
+		t.Fatalf("register name = %v, want AzureTower", registerArgs["name"])
+	}
+	if registerArgs["registration_token"] != "tok-old" {
+		t.Fatalf("register registration_token = %v, want tok-old", registerArgs["registration_token"])
+	}
+
+	loaded, err := agentmail.LoadSessionAgentRegistry(session, projectDir)
+	if err != nil {
+		t.Fatalf("load registry: %v", err)
+	}
+	if got := loaded.RegistrationToken("AzureTower"); got != "tok-new" {
+		t.Fatalf("cached token = %q, want tok-new", got)
 	}
 }
 

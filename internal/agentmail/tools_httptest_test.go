@@ -1283,6 +1283,43 @@ func TestRegisterAgent_WithOptionalFields(t *testing.T) {
 	}
 }
 
+func TestUnretireAgent_AttachesCachedToken(t *testing.T) {
+	t.Parallel()
+
+	var receivedArgs map[string]interface{}
+	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
+		"unretire_agent": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
+			receivedArgs = args
+			return AgentLifecycleResult{
+				Status:     "active",
+				AgentName:  "AzureTower",
+				ProjectKey: "/test",
+			}, nil
+		},
+	}))
+	defer server.Close()
+
+	c := NewClient(WithBaseURL(server.URL + "/"))
+	c.SetRegistrationToken("/test", "AzureTower", "tok-azure")
+
+	result, err := c.UnretireAgent(context.Background(), "/test", "AzureTower")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != "active" || result.AgentName != "AzureTower" {
+		t.Fatalf("unexpected lifecycle result: %+v", result)
+	}
+	if receivedArgs["project_key"] != "/test" {
+		t.Errorf("project_key = %v, want /test", receivedArgs["project_key"])
+	}
+	if receivedArgs["agent_name"] != "AzureTower" {
+		t.Errorf("agent_name = %v, want AzureTower", receivedArgs["agent_name"])
+	}
+	if receivedArgs["registration_token"] != "tok-azure" {
+		t.Errorf("registration_token = %v, want tok-azure", receivedArgs["registration_token"])
+	}
+}
+
 func TestFetchInbox_WithAllOptions(t *testing.T) {
 	t.Parallel()
 
