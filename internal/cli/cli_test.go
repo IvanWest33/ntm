@@ -508,6 +508,74 @@ func TestResolveMessageScopeUsesSavedSessionAgentWhenInferringSession(t *testing
 	}
 }
 
+func TestResolveMessageScopeCurrentSessionFallsBackToCWDProject(t *testing.T) {
+	isolateSessionAgentStorage(t)
+
+	parent := t.TempDir()
+	projectDir := filepath.Join(parent, "notaryware")
+	if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: t.TempDir()}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	session := "notaryware"
+	if _, _, err := resolveMessageScope(session); err == nil {
+		t.Fatal("expected explicit message scope to fail without saved/configured session project")
+	}
+
+	gotDir, gotAgent, err := resolveMessageScopeForSession(session, true)
+	if err != nil {
+		t.Fatalf("resolveMessageScopeForSession(inferred) error = %v", err)
+	}
+	if gotDir != projectDir {
+		t.Fatalf("project dir = %q, want %q", gotDir, projectDir)
+	}
+	if gotAgent != "ntm_notaryware" {
+		t.Fatalf("agent name = %q, want %q", gotAgent, "ntm_notaryware")
+	}
+}
+
+func TestResolveMessageScopeCurrentUnrelatedSessionUsesProjectSession(t *testing.T) {
+	isolateSessionAgentStorage(t)
+
+	parent := t.TempDir()
+	projectDir := filepath.Join(parent, "notaryware")
+	if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	saveSessionAgentForTest(t, "notaryware", projectDir, "BlueLake")
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: t.TempDir()}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	gotDir, gotAgent, err := resolveMessageScopeForSession("coord", true)
+	if err != nil {
+		t.Fatalf("resolveMessageScopeForSession(inferred unrelated session) error = %v", err)
+	}
+	if gotDir != projectDir {
+		t.Fatalf("project dir = %q, want %q", gotDir, projectDir)
+	}
+	if gotAgent != "BlueLake" {
+		t.Fatalf("agent name = %q, want %q", gotAgent, "BlueLake")
+	}
+}
+
 func TestResolveMessageScopeUsesCurrentPaneRegistryIdentity(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 	isolateSessionAgentStorage(t)

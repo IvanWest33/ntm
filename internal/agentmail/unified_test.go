@@ -3,6 +3,7 @@ package agentmail
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -305,6 +306,54 @@ func TestUnifiedMessengerSend_FallsBackToBDWhenAgentMailFails(t *testing.T) {
 	}
 	if len(bdClient.sendCalls) != 1 {
 		t.Fatalf("expected BD send called on agent mail error, got %d", len(bdClient.sendCalls))
+	}
+}
+
+func TestUnifiedMessengerSend_ReturnsAgentMailErrorWhenNoFallback(t *testing.T) {
+	am := &fakeAMClient{available: true, sendErr: errors.New("sender not registered")}
+
+	unified := &UnifiedMessenger{
+		amClient:   am,
+		projectKey: "/repo",
+		agentName:  "agent",
+	}
+
+	err := unified.Send(context.Background(), "target", "subject", "body")
+	if err == nil {
+		t.Fatal("expected send error")
+	}
+	msg := err.Error()
+	for _, want := range []string{"agent mail send failed", "/repo", "agent", "target", "sender not registered"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q missing %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "no message channels available") {
+		t.Fatalf("error should preserve the Agent Mail failure, got %q", msg)
+	}
+}
+
+func TestUnifiedMessengerSend_ReturnsAgentMailUnavailableWhenNoFallback(t *testing.T) {
+	am := &fakeAMClient{available: false}
+
+	unified := &UnifiedMessenger{
+		amClient:   am,
+		projectKey: "/repo",
+		agentName:  "agent",
+	}
+
+	err := unified.Send(context.Background(), "target", "subject", "body")
+	if err == nil {
+		t.Fatal("expected send error")
+	}
+	msg := err.Error()
+	for _, want := range []string{"agent mail unavailable", "/repo", "agent", "target"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q missing %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "no message channels") {
+		t.Fatalf("error should explain Agent Mail availability, got %q", msg)
 	}
 }
 

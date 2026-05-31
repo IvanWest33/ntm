@@ -119,29 +119,42 @@ func (m *UnifiedMessenger) Inbox(ctx context.Context) ([]UnifiedMessage, error) 
 // Send sends a message via the preferred channel (defaulting to Agent Mail if available, else BD)
 // For now, it tries Agent Mail first.
 func (m *UnifiedMessenger) Send(ctx context.Context, to, subject, body string) error {
+	var agentMailErr error
+
 	// Try Agent Mail first
-	if m.amClient != nil && m.amClient.IsAvailable() {
-		_, err := m.amClient.SendMessage(ctx, SendMessageOptions{
-			ProjectKey: m.projectKey,
-			SenderName: m.agentName,
-			To:         []string{to},
-			Subject:    subject,
-			BodyMD:     body,
-		})
-		if err == nil {
-			return nil
+	if m.amClient != nil {
+		if m.amClient.IsAvailable() {
+			_, err := m.amClient.SendMessage(ctx, SendMessageOptions{
+				ProjectKey: m.projectKey,
+				SenderName: m.agentName,
+				To:         []string{to},
+				Subject:    subject,
+				BodyMD:     body,
+			})
+			if err == nil {
+				return nil
+			}
+			agentMailErr = err
+		} else if m.bdClient == nil {
+			return fmt.Errorf("agent mail unavailable for project %q from %q to %q; check Agent Mail server availability and ntm Agent Mail configuration", m.projectKey, m.agentName, to)
 		}
-		// If failed, try BD? Or maybe user specifies channel preference?
-		// Fallthrough only on error might be confusing.
-		// For now, just return error if AM configured but failed.
-		// If AM not configured/available, try BD.
 	}
 
 	if m.bdClient != nil {
-		return m.bdClient.Send(ctx, to, body)
+		if err := m.bdClient.Send(ctx, to, body); err != nil {
+			if agentMailErr != nil {
+				return fmt.Errorf("agent mail send failed for project %q from %q to %q: %w; bd fallback failed: %v", m.projectKey, m.agentName, to, agentMailErr, err)
+			}
+			return err
+		}
+		return nil
 	}
 
-	return fmt.Errorf("no message channels available")
+	if agentMailErr != nil {
+		return fmt.Errorf("agent mail send failed for project %q from %q to %q: %w", m.projectKey, m.agentName, to, agentMailErr)
+	}
+
+	return fmt.Errorf("no message channels configured")
 }
 
 // Read retrieves a specific message by its unified ID (e.g., "am-123" or "bd-456")

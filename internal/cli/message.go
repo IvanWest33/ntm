@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -34,7 +35,7 @@ func newMessageInboxCmd() *cobra.Command {
 		Use:   "inbox",
 		Short: "View unified inbox",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			projectDir, agentName, err := resolveMessageScope(tmux.GetCurrentSession())
+			projectDir, agentName, err := resolveMessageCommandScope()
 			if err != nil {
 				return err
 			}
@@ -71,7 +72,7 @@ func newMessageSendCmd() *cobra.Command {
 			to := args[0]
 			body := args[1]
 
-			projectDir, agentName, err := resolveMessageScope(tmux.GetCurrentSession())
+			projectDir, agentName, err := resolveMessageCommandScope()
 			if err != nil {
 				return err
 			}
@@ -96,7 +97,7 @@ This marks the message as read.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
 
-			projectDir, agentName, err := resolveMessageScope(tmux.GetCurrentSession())
+			projectDir, agentName, err := resolveMessageCommandScope()
 			if err != nil {
 				return err
 			}
@@ -142,7 +143,7 @@ This marks the message as both read and acknowledged.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
 
-			projectDir, agentName, err := resolveMessageScope(tmux.GetCurrentSession())
+			projectDir, agentName, err := resolveMessageCommandScope()
 			if err != nil {
 				return err
 			}
@@ -161,6 +162,14 @@ This marks the message as both read and acknowledged.`,
 }
 
 func resolveMessageScope(session string) (string, string, error) {
+	return resolveMessageScopeForSession(session, false)
+}
+
+func resolveMessageCommandScope() (string, string, error) {
+	return resolveMessageScopeForSession(tmux.GetCurrentSession(), true)
+}
+
+func resolveMessageScopeForSession(session string, inferredCurrentSession bool) (string, string, error) {
 	session = strings.TrimSpace(session)
 	if session != "" {
 		resolved, err := normalizeProjectScopedSessionName(session, !IsJSONOutput())
@@ -173,9 +182,19 @@ func resolveMessageScope(session string) (string, string, error) {
 	projectDir := ""
 	var err error
 	if session != "" {
-		projectDir, err = resolveExplicitProjectDirForSession(session)
-		if err != nil {
-			return "", "", err
+		if inferredCurrentSession {
+			projectDir = resolveProjectDirForSession(session, false)
+			if projectDir == "" {
+				projectDir = GetProjectRoot()
+			}
+			if !sessionLooksScopedToProject(session, projectDir) {
+				session = defaultMessageSessionForProject(projectDir)
+			}
+		} else {
+			projectDir, err = resolveExplicitProjectDirForSession(session)
+			if err != nil {
+				return "", "", err
+			}
 		}
 		projectDir = refineAgentMailProjectKey(session, projectDir)
 	} else {
@@ -200,4 +219,28 @@ func resolveMessageScope(session string) (string, string, error) {
 	}
 
 	return projectDir, agentName, nil
+}
+
+func sessionLooksScopedToProject(session, projectDir string) bool {
+	session = strings.TrimSpace(session)
+	projectDir = strings.TrimSpace(projectDir)
+	if session == "" || projectDir == "" {
+		return false
+	}
+	if session == filepath.Base(projectDir) {
+		return true
+	}
+
+	_, sessionProject, savedProject := projectDirCandidatesForSession(session, false)
+	resolved := bestUsableProjectDir(savedProject, sessionProject)
+	return resolved != "" && filepath.Clean(resolved) == filepath.Clean(projectDir)
+}
+
+func defaultMessageSessionForProject(projectDir string) string {
+	if sessionList, err := tmux.ListSessions(); err == nil {
+		if inferred, _ := inferSessionFromCWD(sessionList); inferred != "" {
+			return inferred
+		}
+	}
+	return filepath.Base(projectDir)
 }
