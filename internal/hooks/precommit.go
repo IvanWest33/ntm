@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -41,12 +42,14 @@ func DefaultPreCommitConfig() PreCommitConfig {
 
 // PreCommitResult contains the result of running the pre-commit hook.
 type PreCommitResult struct {
-	Passed       bool                `json:"passed"`
-	StagedFiles  []string            `json:"staged_files"`
-	ScanResult   *scanner.ScanResult `json:"scan_result,omitempty"`
-	BlockReason  string              `json:"block_reason,omitempty"`
-	Duration     time.Duration       `json:"duration"`
-	UBSAvailable bool                `json:"ubs_available"`
+	Passed         bool                `json:"passed"`
+	StagedFiles    []string            `json:"staged_files"`
+	ScanResult     *scanner.ScanResult `json:"scan_result,omitempty"`
+	BaselineTotals *scanner.ScanTotals `json:"baseline_totals,omitempty"`
+	NewTotals      scanner.ScanTotals  `json:"new_totals"`
+	BlockReason    string              `json:"block_reason,omitempty"`
+	Duration       time.Duration       `json:"duration"`
+	UBSAvailable   bool                `json:"ubs_available"`
 }
 
 // RunPreCommit executes the pre-commit hook logic.
@@ -105,22 +108,104 @@ func RunPreCommit(ctx context.Context, repoPath string, config PreCommitConfig) 
 	result.ScanResult = scanResult
 	result.Duration = time.Since(startTime)
 
+	thresholdTotals := scanResult.Totals
+	if baselineTotals, ok, err := scanHeadVersions(ctx, repoPath, stagedFiles, opts); err != nil {
+		return nil, fmt.Errorf("running baseline scan: %w", err)
+	} else if ok {
+		result.BaselineTotals = &baselineTotals
+		thresholdTotals = newIssueTotals(scanResult.Totals, baselineTotals)
+	}
+	result.NewTotals = thresholdTotals
+
 	// Check thresholds
-	if scanResult.Totals.Critical > config.MaxCritical {
+	if thresholdTotals.Critical > config.MaxCritical {
 		result.Passed = false
 		result.BlockReason = fmt.Sprintf(
-			"critical issues exceeded threshold: %d > %d",
-			scanResult.Totals.Critical, config.MaxCritical,
+			"new critical issues exceeded threshold: %d > %d",
+			thresholdTotals.Critical, config.MaxCritical,
 		)
-	} else if config.FailOnWarning && scanResult.Totals.Warning > config.MaxWarning {
+	} else if config.FailOnWarning && thresholdTotals.Warning > config.MaxWarning {
 		result.Passed = false
 		result.BlockReason = fmt.Sprintf(
-			"warning issues exceeded threshold: %d > %d",
-			scanResult.Totals.Warning, config.MaxWarning,
+			"new warning issues exceeded threshold: %d > %d",
+			thresholdTotals.Warning, config.MaxWarning,
 		)
 	}
 
 	return result, nil
+}
+
+func scanHeadVersions(ctx context.Context, repoPath string, stagedFiles []string, opts scanner.ScanOptions) (scanner.ScanTotals, bool, error) {
+	tmpDir, err := os.MkdirTemp("", "ntm-precommit-head-*")
+	if err != nil {
+		return scanner.ScanTotals{}, false, err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	hasBaselineFile := false
+	for _, file := range stagedFiles {
+		cleanPath, ok := safeRepoRelativePath(file)
+		if !ok {
+			continue
+		}
+		contents, err := gitShowHead(ctx, repoPath, cleanPath)
+		if err != nil {
+			continue
+		}
+		targetPath := filepath.Join(tmpDir, cleanPath)
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			return scanner.ScanTotals{}, false, err
+		}
+		if err := os.WriteFile(targetPath, contents, 0o644); err != nil {
+			return scanner.ScanTotals{}, false, err
+		}
+		hasBaselineFile = true
+	}
+	if !hasBaselineFile {
+		return scanner.ScanTotals{}, false, nil
+	}
+
+	s, err := scanner.New()
+	if err != nil {
+		return scanner.ScanTotals{}, false, err
+	}
+	baselineOpts := opts
+	baselineOpts.StagedOnly = false
+	baselineOpts.DiffOnly = false
+	baselineResult, err := s.Scan(ctx, tmpDir, baselineOpts)
+	if err != nil {
+		return scanner.ScanTotals{}, false, err
+	}
+	return baselineResult.Totals, true, nil
+}
+
+func gitShowHead(ctx context.Context, repoPath, file string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "show", "HEAD:"+file)
+	return cmd.Output()
+}
+
+func safeRepoRelativePath(file string) (string, bool) {
+	cleanPath := filepath.Clean(file)
+	if cleanPath == "." || filepath.IsAbs(cleanPath) || cleanPath == ".." || strings.HasPrefix(cleanPath, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return cleanPath, true
+}
+
+func newIssueTotals(current, baseline scanner.ScanTotals) scanner.ScanTotals {
+	return scanner.ScanTotals{
+		Critical: subtractFloorZero(current.Critical, baseline.Critical),
+		Warning:  subtractFloorZero(current.Warning, baseline.Warning),
+		Info:     subtractFloorZero(current.Info, baseline.Info),
+		Files:    current.Files,
+	}
+}
+
+func subtractFloorZero(current, baseline int) int {
+	if current <= baseline {
+		return 0
+	}
+	return current - baseline
 }
 
 // getStagedFiles returns a list of staged file paths.

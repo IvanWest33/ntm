@@ -241,6 +241,30 @@ func TestGetStagedFiles_InvalidRepo(t *testing.T) {
 	}
 }
 
+func TestNewIssueTotalsSubtractsBaselineWithoutGoingNegative(t *testing.T) {
+	t.Parallel()
+	got := newIssueTotals(
+		scanner.ScanTotals{Critical: 5, Warning: 1, Info: 10, Files: 2},
+		scanner.ScanTotals{Critical: 3, Warning: 2, Info: 10, Files: 2},
+	)
+	want := scanner.ScanTotals{Critical: 2, Warning: 0, Info: 0, Files: 2}
+	if got != want {
+		t.Fatalf("newIssueTotals() = %+v, want %+v", got, want)
+	}
+}
+
+func TestSafeRepoRelativePathRejectsEscapes(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{"../x.go", "/tmp/x.go", ".."} {
+		if got, ok := safeRepoRelativePath(path); ok {
+			t.Fatalf("safeRepoRelativePath(%q) = %q, true; want rejection", path, got)
+		}
+	}
+	if got, ok := safeRepoRelativePath("internal/hooks/precommit.go"); !ok || got != "internal/hooks/precommit.go" {
+		t.Fatalf("safeRepoRelativePath valid path = %q, %v", got, ok)
+	}
+}
+
 // helper
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && searchSubstring(s, substr)
