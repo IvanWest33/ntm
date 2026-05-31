@@ -154,7 +154,11 @@ func parseEnvDurationMs(key string) (time.Duration, error) {
 
 func resolveSpawnAssignAgentType(agent string, ccOnly, codOnly, gmiOnly bool) string {
 	if strings.TrimSpace(agent) != "" {
-		return robot.ResolveAgentType(agent)
+		resolved := robot.ResolveAgentType(agent)
+		if resolved == "any" || resolved == "all" {
+			return ""
+		}
+		return resolved
 	}
 	if ccOnly {
 		return "claude"
@@ -1777,8 +1781,8 @@ func spawnSessionLogic(opts SpawnOptions) (err error) {
 		// not just the persona's display name. Lets orchestrators verify the
 		// persona→pane→prompt mapping after a --profile-set launch (ntm#159).
 		personaPromptSource string
-		command       string
-		promptDelay   time.Duration // Stagger delay before prompt delivery
+		command             string
+		promptDelay         time.Duration // Stagger delay before prompt delivery
 	}
 	var launchedAgents []launchedAgent
 

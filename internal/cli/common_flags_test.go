@@ -124,8 +124,11 @@ func TestAgentTypeFilterEquivalence(t *testing.T) {
 		{false, false, false, "codex-cli", "codex"},
 		{false, false, false, "gemini", "gemini"},
 		{false, false, false, " google-gemini ", "gemini"},
+		{false, false, false, "any", ""},
+		{false, false, false, "ALL", ""},
 		// --agent flag takes precedence
 		{true, false, false, "codex", "codex"},
+		{true, false, false, "any", ""},
 	}
 
 	for _, tc := range tests {
@@ -174,8 +177,11 @@ func TestSpawnAssignAgentTypeAliases(t *testing.T) {
 		{false, false, false, "codex-cli", "codex"},
 		{false, false, false, "GEMINI", "gemini"},
 		{false, false, false, " google-gemini ", "gemini"},
+		{false, false, false, "any", ""},
+		{false, false, false, "ALL", ""},
 		// --assign-agent should take precedence
 		{true, false, false, "codex", "codex"},
+		{true, false, false, "any", ""},
 	}
 
 	for _, tc := range tests {

@@ -651,7 +651,11 @@ func buildAssignWatchOverlayWarning(key string, err error) string {
 func resolveAgentTypeFilter() string {
 	// Explicit --agent flag takes precedence
 	if assignAgentType != "" {
-		return robot.ResolveAgentType(assignAgentType)
+		resolved := robot.ResolveAgentType(assignAgentType)
+		if resolved == "any" || resolved == "all" {
+			return ""
+		}
+		return resolved
 	}
 	// Convenience flags
 	if assignCCOnly {

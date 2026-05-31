@@ -253,11 +253,14 @@ func TestResolveSpawnAssignAgentType(t *testing.T) {
 		{"explicit short code", "CC", false, false, false, "claude"},
 		{"explicit cli alias", "codex-cli", false, false, false, "codex"},
 		{"explicit spaced alias", " google-gemini ", false, false, false, "gemini"},
+		{"explicit any disables filter", "any", false, false, false, ""},
+		{"explicit all disables filter", "ALL", false, false, false, ""},
 		{"cc only flag", "", true, false, false, "claude"},
 		{"cod only flag", "", false, true, false, "codex"},
 		{"gmi only flag", "", false, false, true, "gemini"},
 		{"no agent no flags", "", false, false, false, ""},
 		{"agent takes precedence", "codex", true, false, false, "codex"},
+		{"any takes precedence", "any", true, false, false, ""},
 		{"whitespace agent", "  ", false, false, false, ""},
 	}
 
