@@ -170,6 +170,7 @@ func resolveMessageCommandScope() (string, string, error) {
 }
 
 func resolveMessageScopeForSession(session string, inferredCurrentSession bool) (string, string, error) {
+	explicitSession := strings.TrimSpace(session) != ""
 	session = strings.TrimSpace(session)
 	if session != "" {
 		resolved, err := normalizeProjectScopedSessionName(session, !IsJSONOutput())
@@ -205,12 +206,14 @@ func resolveMessageScopeForSession(session string, inferredCurrentSession bool) 
 	}
 
 	if session == "" {
-		session = defaultProjectScopedSession(projectDir)
+		session = defaultMessageSessionForProject(projectDir)
 	}
 	projectDir = refineAgentMailProjectKey(session, projectDir)
 
-	if agentName := resolveSessionPaneAgentName(session, projectDir); agentName != "" {
-		return projectDir, agentName, nil
+	if explicitSession || inferredCurrentSession {
+		if agentName := resolveSessionPaneAgentName(session, projectDir); agentName != "" {
+			return projectDir, agentName, nil
+		}
 	}
 
 	agentName := fmt.Sprintf("ntm_%s", session)
