@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -149,6 +150,59 @@ func TestScanOptions(t *testing.T) {
 
 	t.Logf("Scan with options: files=%d, duration=%v",
 		result.Totals.Files, result.Duration)
+}
+
+func TestScanTimeoutReturnsErrTimeoutAndStopsOutputChildren(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeUBS := filepath.Join(tmpDir, "ubs")
+	childPIDFile := filepath.Join(tmpDir, "child.pid")
+	heartbeatFile := filepath.Join(tmpDir, "heartbeat")
+	script := `#!/bin/sh
+(
+  i=0
+  while [ "$i" -lt 60 ]; do
+    echo tick >> "$NTM_TEST_HEARTBEAT_FILE"
+    i=$((i + 1))
+    sleep 0.05
+  done
+) &
+echo "$!" > "$NTM_TEST_CHILD_PID_FILE"
+sleep 3
+`
+	if err := os.WriteFile(fakeUBS, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake ubs: %v", err)
+	}
+	t.Setenv("NTM_TEST_CHILD_PID_FILE", childPIDFile)
+	t.Setenv("NTM_TEST_HEARTBEAT_FILE", heartbeatFile)
+
+	scanner := &Scanner{binaryPath: fakeUBS}
+	start := time.Now()
+	_, err := scanner.Scan(context.Background(), tmpDir, ScanOptions{Timeout: 150 * time.Millisecond})
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Scan() error = %v, want ErrTimeout", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Scan() took %s; child process likely kept stdout open", elapsed)
+	}
+
+	before := fileSizeIfExists(t, heartbeatFile)
+	time.Sleep(250 * time.Millisecond)
+	after := fileSizeIfExists(t, heartbeatFile)
+	if after > before {
+		t.Fatalf("fake UBS child kept running after timeout: heartbeat grew from %d to %d bytes", before, after)
+	}
+}
+
+func fileSizeIfExists(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info.Size()
 }
 
 func TestScanResultMethods(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -70,6 +71,7 @@ func (s *Scanner) Scan(ctx context.Context, path string, opts ScanOptions) (*Sca
 
 	cmd := exec.CommandContext(ctx, s.binaryPath, args...)
 	cmd.WaitDelay = 2 * time.Second
+	configureScanCommandProcessGroup(cmd)
 
 	// Capture stderr separately
 	var stderr bytes.Buffer
@@ -92,7 +94,7 @@ func (s *Scanner) Scan(ctx context.Context, path string, opts ScanOptions) (*Sca
 	var waitDone bool
 	defer func() {
 		if !waitDone && cmd.Process != nil {
-			_ = cmd.Process.Kill()
+			killScanCommandProcessGroup(cmd)
 			_ = cmd.Wait() // Reap the zombie
 		}
 	}()
@@ -100,11 +102,26 @@ func (s *Scanner) Scan(ctx context.Context, path string, opts ScanOptions) (*Sca
 	// Read output with limit
 	output, err := io.ReadAll(io.LimitReader(stdoutPipe, MaxScanOutputBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("reading output: %w", err)
+		killScanCommandProcessGroup(cmd)
+		waitErr := cmd.Wait()
+		waitDone = true
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, ErrTimeout
+		}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("%w: context canceled while reading ubs output: %v", ErrScanFailed, ctx.Err())
+		}
+		if waitErr != nil {
+			return nil, fmt.Errorf("reading ubs output: %w (wait: %v; stderr: %s)", err, waitErr, stderr.String())
+		}
+		return nil, fmt.Errorf("reading ubs output: %w", err)
 	}
 
 	// Check if output exceeded limit
 	if len(output) > MaxScanOutputBytes {
+		killScanCommandProcessGroup(cmd)
+		_ = cmd.Wait()
+		waitDone = true
 		return nil, ErrOutputTooLarge
 	}
 
@@ -159,6 +176,27 @@ func (s *Scanner) Scan(ctx context.Context, path string, opts ScanOptions) (*Sca
 	}
 
 	return result, nil
+}
+
+func configureScanCommandProcessGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		killScanCommandProcessGroup(cmd)
+		return nil
+	}
+}
+
+func killScanCommandProcessGroup(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	pid := cmd.Process.Pid
+	if pid > 0 {
+		if err := syscall.Kill(-pid, syscall.SIGKILL); err == nil || errors.Is(err, syscall.ESRCH) {
+			return
+		}
+	}
+	_ = cmd.Process.Kill()
 }
 
 // ScanFile runs UBS on a single file.
