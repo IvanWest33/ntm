@@ -2,6 +2,7 @@ package swarm
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -157,26 +158,50 @@ func TestBatchLaunchResult(t *testing.T) {
 	}
 }
 
+// TestGetPaneTarget is hermetic via the getFirstWindow seam (bd-uu49h). It
+// used to call the live tmux server, so its outcome flipped depending on
+// whether sessions named "test"/"my-session" existed on the host and on the
+// host's base-index.
 func TestGetPaneTarget(t *testing.T) {
-	tests := []struct {
-		session  string
-		pane     int
-		expected string
-	}{
-		{"test", 1, "test:1.1"},
-		{"my-session", 5, "my-session:1.5"},
-		{"cc_agents_1", 10, "cc_agents_1:1.10"},
+	stubFirstWindow := func(t *testing.T, win int, err error) {
+		t.Helper()
+		prev := getFirstWindow
+		getFirstWindow = func(session string) (int, error) { return win, err }
+		t.Cleanup(func() { getFirstWindow = prev })
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.expected, func(t *testing.T) {
-			result := GetPaneTarget(tt.session, tt.pane)
-			if result != tt.expected {
+	t.Run("resolves the session's first window index", func(t *testing.T) {
+		stubFirstWindow(t, 1, nil)
+		tests := []struct {
+			session  string
+			pane     int
+			expected string
+		}{
+			{"test", 1, "test:1.1"},
+			{"my-session", 5, "my-session:1.5"},
+			{"cc_agents_1", 10, "cc_agents_1:1.10"},
+		}
+		for _, tt := range tests {
+			if got := GetPaneTarget(tt.session, tt.pane); got != tt.expected {
 				t.Errorf("GetPaneTarget(%q, %d) = %q, want %q",
-					tt.session, tt.pane, result, tt.expected)
+					tt.session, tt.pane, got, tt.expected)
 			}
-		})
-	}
+		}
+	})
+
+	t.Run("honors base-index 0 sessions", func(t *testing.T) {
+		stubFirstWindow(t, 0, nil)
+		if got := GetPaneTarget("notaryware", 5); got != "notaryware:0.5" {
+			t.Errorf("GetPaneTarget(notaryware, 5) = %q, want notaryware:0.5", got)
+		}
+	})
+
+	t.Run("falls back to window 1 when the lookup fails", func(t *testing.T) {
+		stubFirstWindow(t, 0, errors.New("no server running"))
+		if got := GetPaneTarget("absent", 3); got != "absent:1.3" {
+			t.Errorf("GetPaneTarget(absent, 3) = %q, want absent:1.3", got)
+		}
+	})
 }
 
 func TestValidateProjectPath(t *testing.T) {

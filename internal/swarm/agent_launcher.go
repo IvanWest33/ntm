@@ -105,10 +105,16 @@ func (l *AgentLauncher) logger() *slog.Logger {
 	return slog.Default()
 }
 
+// getFirstWindow is a seam over tmux.GetFirstWindow so unit tests stay
+// hermetic: without it, target formatting queries the live tmux server and
+// the result depends on which session names happen to exist on the host
+// (bd-uu49h: a real session named "test" made TestGetPaneTarget fail).
+var getFirstWindow = tmux.GetFirstWindow
+
 // formatPaneTarget formats a target string for tmux send-keys.
 // It resolves the first window index of the session.
 func formatPaneTarget(session string, pane int) string {
-	firstWin, err := tmux.GetFirstWindow(session)
+	firstWin, err := getFirstWindow(session)
 	if err != nil {
 		firstWin = 1 // fallback
 	}
