@@ -250,6 +250,34 @@ func activeWorkBelow(lines []string, promptIdx int) bool {
 	return false
 }
 
+// DetectActiveSpinnerFromOutput reports whether recent pane output contains a
+// direct active-turn spinner. It is intentionally narrower than "not idle":
+// prompt text sitting in a composer is also not idle, but it is not proof that
+// the agent accepted and started the submitted turn.
+func DetectActiveSpinnerFromOutput(output string, agentType string) bool {
+	agentType = string(agent.AgentType(agentType).Canonical())
+	if agentType != "cc" {
+		return false
+	}
+
+	clean := StripANSI(output)
+	lines := strings.Split(clean, "\n")
+	linesChecked := 0
+	for i := len(lines) - 1; i >= 0 && linesChecked < maxIdleScanLines; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		linesChecked++
+		for _, p := range ccActiveSpinnerPatterns {
+			if p.MatchString(line) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // GetLastNonEmptyLine returns the last non-empty line from output
 func GetLastNonEmptyLine(output string) string {
 	output = StripANSI(output)

@@ -396,3 +396,43 @@ func TestDetectIdleFromOutput_MultipleLines(t *testing.T) {
 		})
 	}
 }
+
+func TestDetectActiveSpinnerFromOutput(t *testing.T) {
+	tests := []struct {
+		name      string
+		output    string
+		agentType string
+		expected  bool
+	}{
+		{
+			name: "active cc turn with prompt still drawn",
+			output: "❯ \n" +
+				"───────────\n" +
+				"  Scurrying… (12s · esc to interrupt)\n" +
+				"  ? for shortcu…\n",
+			agentType: "cc",
+			expected:  true,
+		},
+		{
+			name:      "queued composer text is not active proof",
+			output:    "❯ marching orders",
+			agentType: "cc",
+			expected:  false,
+		},
+		{
+			name:      "non cc helper stays narrow",
+			output:    "Scurrying… (12s · esc to interrupt)",
+			agentType: "cod",
+			expected:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := DetectActiveSpinnerFromOutput(tt.output, tt.agentType)
+			if result != tt.expected {
+				t.Errorf("DetectActiveSpinnerFromOutput = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}

@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -49,6 +52,14 @@ type InjectionResult struct {
 	SentAt      time.Time     `json:"sent_at"`
 }
 
+type promptInjectorTmux interface {
+	SendKeysForAgent(target, keys string, enter bool, agentType tmux.AgentType) error
+	SendKeys(target, keys string, enter bool) error
+	CaptureForStatusDetectionContext(ctx context.Context, target string) (string, error)
+	RunContext(ctx context.Context, args ...string) (string, error)
+	GetPanes(session string) ([]tmux.Pane, error)
+}
+
 // BatchInjectionResult tracks the results of a batch injection operation.
 type BatchInjectionResult struct {
 	TotalPanes int               `json:"total_panes"`
@@ -66,7 +77,7 @@ type BatchInjectionResult struct {
 type PromptInjector struct {
 	// TmuxClient for sending keys to panes.
 	// If nil, the default tmux client is used.
-	TmuxClient *tmux.Client
+	TmuxClient promptInjectorTmux
 
 	// SessionOrchestrator for cached session targeting.
 	SessionOrchestrator *SessionOrchestrator
@@ -84,6 +95,22 @@ type PromptInjector struct {
 	// that need double-Enter (like Codex).
 	// Default: 500ms
 	DoubleEnterDelay time.Duration
+
+	// ReadyTimeout bounds how long injection waits for a pane to become idle.
+	// Default: 30s
+	ReadyTimeout time.Duration
+
+	// ReadyPollInterval controls how often readiness is checked.
+	// Default: 250ms
+	ReadyPollInterval time.Duration
+
+	// SubmitVerificationTimeout bounds each post-Enter verification attempt.
+	// Default: 3s
+	SubmitVerificationTimeout time.Duration
+
+	// SubmitVerificationPollInterval controls post-Enter verification polling.
+	// Default: 150ms
+	SubmitVerificationPollInterval time.Duration
 
 	// Logger for structured logging.
 	Logger *slog.Logger
@@ -104,12 +131,16 @@ type PromptInjector struct {
 // NewPromptInjector creates a new PromptInjector with default settings.
 func NewPromptInjector() *PromptInjector {
 	return &PromptInjector{
-		TmuxClient:          nil,
-		SessionOrchestrator: NewSessionOrchestrator(),
-		StaggerDelay:        300 * time.Millisecond,
-		EnterDelay:          100 * time.Millisecond,
-		DoubleEnterDelay:    500 * time.Millisecond,
-		Logger:              slog.Default(),
+		TmuxClient:                     nil,
+		SessionOrchestrator:            NewSessionOrchestrator(),
+		StaggerDelay:                   300 * time.Millisecond,
+		EnterDelay:                     100 * time.Millisecond,
+		DoubleEnterDelay:               500 * time.Millisecond,
+		ReadyTimeout:                   30 * time.Second,
+		ReadyPollInterval:              250 * time.Millisecond,
+		SubmitVerificationTimeout:      3 * time.Second,
+		SubmitVerificationPollInterval: 150 * time.Millisecond,
+		Logger:                         slog.Default(),
 		Templates: map[string]string{
 			"default": DefaultMarchingOrders,
 			"review":  ReviewTemplate,
@@ -151,7 +182,7 @@ func (p *PromptInjector) WithAdaptiveDelay(enabled bool) *PromptInjector {
 }
 
 // tmuxClient returns the configured tmux client or the default client.
-func (p *PromptInjector) tmuxClient() *tmux.Client {
+func (p *PromptInjector) tmuxClient() promptInjectorTmux {
 	if p.TmuxClient != nil {
 		return p.TmuxClient
 	}
@@ -254,23 +285,38 @@ func (p *PromptInjector) sendToPane(sessionPane, agentType string, prompt string
 
 	// Wait for agent to be ready (at idle prompt)
 	// This prevents race conditions where we send input before the agent process is fully started
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), p.readyTimeout())
 	defer cancel()
 	if err := p.WaitForReady(ctx, sessionPane, agentType); err != nil {
 		p.logger().Warn("[PromptInjector] wait_ready_failed",
 			"target", sessionPane,
 			"error", err,
-			"proceeding", true)
+			"proceeding", false)
+		return fmt.Errorf("wait for ready: %w", err)
 	}
 
 	// Use agent-aware send method for reliable multi-line prompt delivery
 	// For Gemini, this uses buffer-based paste to avoid newline interpretation issues
 	// Send without Enter first
 	aType := tmux.AgentType(agentType)
-	if err := client.SendKeysForAgent(sessionPane, prompt, false, aType); err != nil {
-		return fmt.Errorf("send prompt text: %w", err)
+	if err := p.sendPromptText(client, sessionPane, aType, prompt); err != nil {
+		return err
+	}
+	if err := p.submitPromptWithVerification(sessionPane, agentType, aType, prompt); err != nil {
+		return err
 	}
 
+	return nil
+}
+
+func (p *PromptInjector) sendPromptText(client promptInjectorTmux, sessionPane string, agentType tmux.AgentType, prompt string) error {
+	if err := client.SendKeysForAgent(sessionPane, prompt, false, agentType); err != nil {
+		return fmt.Errorf("send prompt text: %w", err)
+	}
+	return nil
+}
+
+func (p *PromptInjector) sendSubmitEnterSequence(client promptInjectorTmux, sessionPane string, agentType tmux.AgentType) error {
 	// Wait before sending Enter
 	time.Sleep(p.EnterDelay)
 
@@ -281,7 +327,7 @@ func (p *PromptInjector) sendToPane(sessionPane, agentType string, prompt string
 
 	// AGENT QUIRK: Codex and some other agents need double-Enter
 	// The first Enter may not be recognized immediately
-	if aType.NeedsDoubleEnter() {
+	if agentType.NeedsDoubleEnter() {
 		time.Sleep(p.DoubleEnterDelay)
 		if err := client.SendKeys(sessionPane, "", true); err != nil {
 			return fmt.Errorf("send second enter: %w", err)
@@ -291,9 +337,183 @@ func (p *PromptInjector) sendToPane(sessionPane, agentType string, prompt string
 	return nil
 }
 
+func (p *PromptInjector) submitPromptWithVerification(sessionPane, agentType string, aType tmux.AgentType, prompt string) error {
+	client := p.tmuxClient()
+	if err := p.sendSubmitEnterSequence(client, sessionPane, aType); err != nil {
+		return err
+	}
+	if err := p.waitForSubmitVerified(sessionPane, agentType); err == nil {
+		return nil
+	} else {
+		p.logger().Warn("[PromptInjector] submit_verify_failed_retry_enter",
+			"target", sessionPane,
+			"agent_type", agentType,
+			"error", err)
+	}
+
+	if err := p.sendSubmitEnterSequence(client, sessionPane, aType); err != nil {
+		return fmt.Errorf("retry enter: %w", err)
+	}
+	if err := p.waitForSubmitVerified(sessionPane, agentType); err == nil {
+		return nil
+	} else {
+		p.logger().Warn("[PromptInjector] submit_verify_failed_retype",
+			"target", sessionPane,
+			"agent_type", agentType,
+			"error", err)
+	}
+
+	clearCtx, clearCancel := context.WithTimeout(context.Background(), p.submitVerificationTimeout())
+	defer clearCancel()
+	if err := p.clearComposer(clearCtx, sessionPane); err != nil {
+		return fmt.Errorf("clear composer before retype: %w", err)
+	}
+	if err := p.sendPromptText(client, sessionPane, aType, prompt); err != nil {
+		return fmt.Errorf("retype prompt: %w", err)
+	}
+	if err := p.sendSubmitEnterSequence(client, sessionPane, aType); err != nil {
+		return fmt.Errorf("submit retyped prompt: %w", err)
+	}
+	if err := p.waitForSubmitVerified(sessionPane, agentType); err != nil {
+		return fmt.Errorf("prompt submission not verified after retry and retype: %w", err)
+	}
+	return nil
+}
+
+func (p *PromptInjector) clearComposer(ctx context.Context, sessionPane string) error {
+	_, err := p.tmuxClient().RunContext(ctx, "send-keys", "-t", sessionPane, "C-u")
+	return err
+}
+
+func (p *PromptInjector) waitForSubmitVerified(sessionPane, agentType string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), p.submitVerificationTimeout())
+	defer cancel()
+
+	ticker := time.NewTicker(p.submitVerificationPollInterval())
+	defer ticker.Stop()
+
+	var lastState submitVerificationState
+	for {
+		state, err := p.inspectSubmitVerification(ctx, sessionPane, agentType)
+		if err == nil {
+			lastState = state
+			if state.Submitted {
+				return nil
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			if lastState.Reason != "" {
+				return fmt.Errorf("%w: %s", ctx.Err(), lastState.Reason)
+			}
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+type submitVerificationState struct {
+	Submitted bool
+	Reason    string
+	CursorX   int
+}
+
+const emptyComposerCursorXMax = 4
+
+func (p *PromptInjector) inspectSubmitVerification(ctx context.Context, sessionPane, agentType string) (submitVerificationState, error) {
+	cursorX, cursorErr := p.paneCursorX(ctx, sessionPane)
+	if cursorErr == nil {
+		if cursorX > emptyComposerCursorXMax {
+			output, captureErr := p.tmuxClient().CaptureForStatusDetectionContext(ctx, sessionPane)
+			if captureErr == nil && paneShowsActiveTurn(output, agentType) {
+				return submitVerificationState{
+					Submitted: true,
+					Reason:    fmt.Sprintf("pane no longer idle; turn appears started at cursor_x=%d", cursorX),
+					CursorX:   cursorX,
+				}, nil
+			}
+			reason := fmt.Sprintf("composer still has queued text at cursor_x=%d", cursorX)
+			if captureErr != nil {
+				reason = fmt.Sprintf("%s; capture probe failed: %v", reason, captureErr)
+			}
+			return submitVerificationState{
+				Submitted: false,
+				Reason:    reason,
+				CursorX:   cursorX,
+			}, nil
+		}
+		return submitVerificationState{
+			Submitted: true,
+			Reason:    fmt.Sprintf("composer empty at cursor_x=%d", cursorX),
+			CursorX:   cursorX,
+		}, nil
+	}
+
+	output, captureErr := p.tmuxClient().CaptureForStatusDetectionContext(ctx, sessionPane)
+	if captureErr != nil {
+		return submitVerificationState{}, fmt.Errorf("cursor probe failed: %w; capture probe failed: %v", cursorErr, captureErr)
+	}
+	if !status.DetectIdleFromOutput(output, agentType) {
+		return submitVerificationState{Submitted: true, Reason: "pane no longer idle; turn appears started"}, nil
+	}
+	return submitVerificationState{Submitted: false, Reason: "pane remains idle and cursor probe failed"}, nil
+}
+
+func paneShowsActiveTurn(output, agentType string) bool {
+	if status.DetectActiveSpinnerFromOutput(output, agentType) {
+		return true
+	}
+	state, err := agent.NewParser().ParseWithHint(output, agent.AgentType(agentType))
+	if err != nil {
+		return false
+	}
+	return state.IsWorking && !state.IsIdle
+}
+
+func (p *PromptInjector) paneCursorX(ctx context.Context, sessionPane string) (int, error) {
+	out, err := p.tmuxClient().RunContext(ctx, "display-message", "-p", "-t", sessionPane, "#{cursor_x}")
+	if err != nil {
+		return 0, err
+	}
+	cursorX, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, fmt.Errorf("parse cursor_x %q: %w", strings.TrimSpace(out), err)
+	}
+	return cursorX, nil
+}
+
+func (p *PromptInjector) readyTimeout() time.Duration {
+	if p.ReadyTimeout > 0 {
+		return p.ReadyTimeout
+	}
+	return 30 * time.Second
+}
+
+func (p *PromptInjector) readyPollInterval() time.Duration {
+	if p.ReadyPollInterval > 0 {
+		return p.ReadyPollInterval
+	}
+	return 250 * time.Millisecond
+}
+
+func (p *PromptInjector) submitVerificationTimeout() time.Duration {
+	if p.SubmitVerificationTimeout > 0 {
+		return p.SubmitVerificationTimeout
+	}
+	return 3 * time.Second
+}
+
+func (p *PromptInjector) submitVerificationPollInterval() time.Duration {
+	if p.SubmitVerificationPollInterval > 0 {
+		return p.SubmitVerificationPollInterval
+	}
+	return 150 * time.Millisecond
+}
+
 // WaitForReady waits for the agent to show an idle prompt.
 func (p *PromptInjector) WaitForReady(ctx context.Context, target, agentType string) error {
-	ticker := time.NewTicker(250 * time.Millisecond)
+	ticker := time.NewTicker(p.readyPollInterval())
 	defer ticker.Stop()
 
 	for {

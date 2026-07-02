@@ -2,12 +2,96 @@ package swarm
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+type promptInjectorFakeTmux struct {
+	readyOutput      string
+	queuedUntilClear bool
+	cursorXAfterText int
+	sendErr          error
+	runErr           error
+	getPanesErr      error
+	panes            []tmux.Pane
+	calls            []promptInjectorFakeCall
+	textSends        int
+	clearCount       int
+}
+
+type promptInjectorFakeCall struct {
+	Kind  string
+	Key   string
+	Enter bool
+}
+
+func (f *promptInjectorFakeTmux) SendKeysForAgent(target, keys string, enter bool, agentType tmux.AgentType) error {
+	f.calls = append(f.calls, promptInjectorFakeCall{Kind: "text", Key: keys, Enter: enter})
+	f.textSends++
+	return f.sendErr
+}
+
+func (f *promptInjectorFakeTmux) SendKeys(target, keys string, enter bool) error {
+	key := keys
+	if key == "" && enter {
+		key = "Enter"
+	}
+	f.calls = append(f.calls, promptInjectorFakeCall{Kind: "send-keys", Key: key, Enter: enter})
+	return f.sendErr
+}
+
+func (f *promptInjectorFakeTmux) CaptureForStatusDetectionContext(ctx context.Context, target string) (string, error) {
+	if f.textSends == 0 {
+		if f.readyOutput != "" {
+			return f.readyOutput, nil
+		}
+		return "❯ ", nil
+	}
+	if f.queuedUntilClear && f.clearCount == 0 {
+		return "❯ marching orders", nil
+	}
+	return "✽ Brewing… (1s · ↓ 1 tokens)", nil
+}
+
+func (f *promptInjectorFakeTmux) RunContext(ctx context.Context, args ...string) (string, error) {
+	if f.runErr != nil {
+		return "", f.runErr
+	}
+	if len(args) == 0 {
+		return "", fmt.Errorf("missing tmux command")
+	}
+	switch args[0] {
+	case "display-message":
+		if f.textSends > 0 && f.queuedUntilClear && f.clearCount == 0 {
+			return "20\n", nil
+		}
+		if f.textSends > 0 && f.cursorXAfterText > 0 {
+			return fmt.Sprintf("%d\n", f.cursorXAfterText), nil
+		}
+		return "0\n", nil
+	case "send-keys":
+		key := ""
+		if len(args) > 0 {
+			key = args[len(args)-1]
+		}
+		f.calls = append(f.calls, promptInjectorFakeCall{Kind: "raw", Key: key})
+		if key == "C-u" {
+			f.clearCount++
+		}
+		return "", nil
+	default:
+		return "", fmt.Errorf("unexpected tmux command %q", args[0])
+	}
+}
+
+func (f *promptInjectorFakeTmux) GetPanes(session string) ([]tmux.Pane, error) {
+	return f.panes, f.getPanesErr
+}
 
 func TestNewPromptInjector(t *testing.T) {
 	injector := NewPromptInjector()
@@ -39,6 +123,107 @@ func TestNewPromptInjector(t *testing.T) {
 	if len(injector.Templates) == 0 {
 		t.Error("expected non-empty Templates map")
 	}
+}
+
+func TestPromptInjectorWaitForReadyFailClosed(t *testing.T) {
+	fake := &promptInjectorFakeTmux{
+		readyOutput: "✽ Brewing… (12s · ↓ 1k tokens)",
+	}
+	injector := NewPromptInjector()
+	injector.TmuxClient = fake
+	injector.ReadyTimeout = 3 * time.Millisecond
+	injector.ReadyPollInterval = time.Millisecond
+	injector.EnterDelay = 0
+
+	err := injector.InjectPrompt("test:1.1", "cc", "do work")
+	if err == nil {
+		t.Fatal("expected busy pane readiness failure")
+	}
+	if !strings.Contains(err.Error(), "wait for ready") {
+		t.Fatalf("expected wait-for-ready error, got %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("expected no prompt injection into busy pane, got calls: %#v", fake.calls)
+	}
+}
+
+func TestPromptInjectorVerifyAfterSendRetriesEnterThenClearAndRetype(t *testing.T) {
+	fake := &promptInjectorFakeTmux{queuedUntilClear: true}
+	injector := NewPromptInjector()
+	injector.TmuxClient = fake
+	injector.EnterDelay = 0
+	injector.ReadyTimeout = 50 * time.Millisecond
+	injector.ReadyPollInterval = time.Millisecond
+	injector.SubmitVerificationTimeout = 2 * time.Millisecond
+	injector.SubmitVerificationPollInterval = time.Millisecond
+
+	err := injector.InjectPrompt("test:1.1", "cc", "marching orders")
+	if err != nil {
+		t.Fatalf("InjectPrompt returned error: %v", err)
+	}
+
+	if got := countPromptInjectorFakeCalls(fake.calls, "text", "marching orders"); got != 2 {
+		t.Fatalf("expected initial type plus C-u retype, got %d text sends: %#v", got, fake.calls)
+	}
+	if got := countPromptInjectorFakeCalls(fake.calls, "send-keys", "Enter"); got != 3 {
+		t.Fatalf("expected initial Enter, retry Enter, and retyped Enter, got %d: %#v", got, fake.calls)
+	}
+	if got := countPromptInjectorFakeCalls(fake.calls, "raw", "C-u"); got != 1 {
+		t.Fatalf("expected one C-u clear before retype, got %d: %#v", got, fake.calls)
+	}
+
+	wantOrder := []promptInjectorFakeCall{
+		{Kind: "text", Key: "marching orders"},
+		{Kind: "send-keys", Key: "Enter", Enter: true},
+		{Kind: "send-keys", Key: "Enter", Enter: true},
+		{Kind: "raw", Key: "C-u"},
+		{Kind: "text", Key: "marching orders"},
+		{Kind: "send-keys", Key: "Enter", Enter: true},
+	}
+	if len(fake.calls) != len(wantOrder) {
+		t.Fatalf("unexpected call count got %d want %d: %#v", len(fake.calls), len(wantOrder), fake.calls)
+	}
+	for i := range wantOrder {
+		if fake.calls[i] != wantOrder[i] {
+			t.Fatalf("call[%d] = %#v, want %#v; all calls: %#v", i, fake.calls[i], wantOrder[i], fake.calls)
+		}
+	}
+}
+
+func TestPromptInjectorVerifyAfterSendAcceptsStartedTurnWithHighCursor(t *testing.T) {
+	fake := &promptInjectorFakeTmux{cursorXAfterText: 42}
+	injector := NewPromptInjector()
+	injector.TmuxClient = fake
+	injector.EnterDelay = 0
+	injector.ReadyTimeout = 50 * time.Millisecond
+	injector.ReadyPollInterval = time.Millisecond
+	injector.SubmitVerificationTimeout = 10 * time.Millisecond
+	injector.SubmitVerificationPollInterval = time.Millisecond
+
+	err := injector.InjectPrompt("test:1.1", "cc", "marching orders")
+	if err != nil {
+		t.Fatalf("InjectPrompt returned error: %v", err)
+	}
+
+	if got := countPromptInjectorFakeCalls(fake.calls, "text", "marching orders"); got != 1 {
+		t.Fatalf("expected no retype after active turn starts, got %d text sends: %#v", got, fake.calls)
+	}
+	if got := countPromptInjectorFakeCalls(fake.calls, "send-keys", "Enter"); got != 1 {
+		t.Fatalf("expected no retry enter after active turn starts, got %d: %#v", got, fake.calls)
+	}
+	if got := countPromptInjectorFakeCalls(fake.calls, "raw", "C-u"); got != 0 {
+		t.Fatalf("expected no composer clear after active turn starts, got %d: %#v", got, fake.calls)
+	}
+}
+
+func countPromptInjectorFakeCalls(calls []promptInjectorFakeCall, kind, key string) int {
+	count := 0
+	for _, call := range calls {
+		if call.Kind == kind && call.Key == key {
+			count++
+		}
+	}
+	return count
 }
 
 func TestGetTemplate(t *testing.T) {
