@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	ctxmon "github.com/Dicklesworthstone/ntm/internal/context"
@@ -578,6 +579,7 @@ func TestResolveMessageScopeCurrentUnrelatedSessionUsesProjectSession(t *testing
 
 func TestResolveMessageScopeUsesCurrentPaneRegistryIdentity(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
+	testutil.IsolateTmuxSocket(t)
 	isolateSessionAgentStorage(t)
 
 	projectsBase := t.TempDir()
@@ -625,6 +627,105 @@ func TestResolveMessageScopeUsesCurrentPaneRegistryIdentity(t *testing.T) {
 	}
 	if gotAgent != "GreenCastle" {
 		t.Fatalf("agent name = %q, want %q", gotAgent, "GreenCastle")
+	}
+}
+
+func TestLoadResolvedSessionAgentUsesDetachedPaneRegistryIdentity(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+	testutil.IsolateTmuxSocket(t)
+	isolateSessionAgentStorage(t)
+
+	projectsBase := t.TempDir()
+	projectDir := filepath.Join(projectsBase, "lockpaneidentity")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	session := "lockpaneidentity"
+	if err := tmux.CreateSession(session, projectDir); err != nil {
+		t.Fatalf("CreateSession(%q): %v", session, err)
+	}
+	t.Cleanup(func() { _ = tmux.KillSession(session) })
+
+	panes, err := tmux.GetPanes(session)
+	if err != nil {
+		t.Fatalf("GetPanes(%q): %v", session, err)
+	}
+	if len(panes) == 0 {
+		t.Fatal("expected at least one pane")
+	}
+
+	saveSessionAgentForTest(t, session, projectDir, "BlueLake")
+	saveSessionAgentRegistryForTest(t, session, projectDir, "", panes[0].ID, "GreenCastle")
+	if os.Getenv("TMUX") != "" {
+		t.Fatalf("test must stay detached, TMUX = %q", os.Getenv("TMUX"))
+	}
+	t.Setenv("TMUX_PANE", panes[0].ID)
+
+	info, err := loadResolvedSessionAgent(session, projectDir)
+	if err != nil {
+		t.Fatalf("loadResolvedSessionAgent() error = %v", err)
+	}
+	if info == nil {
+		t.Fatal("loadResolvedSessionAgent() = nil")
+	}
+	if info.AgentName != "GreenCastle" {
+		t.Fatalf("agent name = %q, want detached pane identity GreenCastle", info.AgentName)
+	}
+}
+
+func TestLoadResolvedSessionAgentPrefersDetachedPaneIdentityFile(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+	testutil.IsolateTmuxSocket(t)
+	isolateSessionAgentStorage(t)
+
+	projectsBase := t.TempDir()
+	projectDir := filepath.Join(projectsBase, "stale-lock-registry")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	oldCfg := cfg
+	cfg = &config.Config{ProjectsBase: projectsBase}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	session := "stale-lock-registry"
+	if err := tmux.CreateSession(session, projectDir); err != nil {
+		t.Fatalf("CreateSession(%q): %v", session, err)
+	}
+	t.Cleanup(func() { _ = tmux.KillSession(session) })
+
+	panes, err := tmux.GetPanes(session)
+	if err != nil {
+		t.Fatalf("GetPanes(%q): %v", session, err)
+	}
+	if len(panes) == 0 {
+		t.Fatal("expected at least one pane")
+	}
+
+	saveSessionAgentForTest(t, session, projectDir, "BlueLake")
+	saveSessionAgentRegistryForTest(t, session, projectDir, "", panes[0].ID, "CodexAgent7")
+	if _, err := agentmail.WriteIdentity(projectDir, panes[0].ID, "StormyPeak"); err != nil {
+		t.Fatalf("write pane identity: %v", err)
+	}
+	if os.Getenv("TMUX") != "" {
+		t.Fatalf("test must stay detached, TMUX = %q", os.Getenv("TMUX"))
+	}
+	t.Setenv("TMUX_PANE", panes[0].ID)
+
+	info, err := loadResolvedSessionAgent(session, projectDir)
+	if err != nil {
+		t.Fatalf("loadResolvedSessionAgent() error = %v", err)
+	}
+	if info == nil {
+		t.Fatal("loadResolvedSessionAgent() = nil")
+	}
+	if info.AgentName != "StormyPeak" {
+		t.Fatalf("agent name = %q, want pane identity-file value StormyPeak", info.AgentName)
 	}
 }
 

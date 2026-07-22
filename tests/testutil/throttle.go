@@ -1,11 +1,17 @@
 package testutil
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 // TmuxTestThrottle limits concurrent tmux session spawning in tests.
@@ -79,6 +85,46 @@ func RequireTmuxThrottled(t *testing.T) {
 	// multiple packages in parallel.
 	acquireGlobalTmuxTestLock(t)
 	TmuxTestThrottle.AcquireForTest(t)
+}
+
+// IsolateTmuxSocket starts a named tmux server in a test-owned socket
+// directory and routes NTM's local tmux client to it. The test remains
+// detached (TMUX is empty) while TMUX_PANE can still identify its target pane.
+//
+// Use this before any test that creates a tmux session. It deliberately does
+// not call `kill-server`: callers clean up only the test sessions they create.
+func IsolateTmuxSocket(t *testing.T) string {
+	t.Helper()
+
+	// Go's t.TempDir() embeds the full test name, which can exceed Unix-domain
+	// socket limits once tmux adds tmux-UID/<socket-name>. Keep this private
+	// root deliberately short while retaining test-scoped cleanup.
+	socketRoot, err := os.MkdirTemp("/tmp", "ntm-tmux-")
+	if err != nil {
+		t.Fatalf("create isolated tmux socket directory: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(socketRoot); err != nil {
+			t.Errorf("remove isolated tmux socket directory %q: %v", socketRoot, err)
+		}
+	})
+	socketName := fmt.Sprintf("ntm-test-%d", time.Now().UnixNano())
+	socketPath := filepath.Join(socketRoot, fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
+
+	t.Setenv("TMUX_TMPDIR", socketRoot)
+	t.Setenv("TMUX", "")
+	t.Setenv("NTM_TMUX_SOCKET_PATH", socketPath)
+
+	cmd := exec.Command(tmux.BinaryPath(), "-L", socketName, "start-server")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("start isolated tmux server: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(socketPath); err != nil {
+		t.Fatalf("isolated tmux socket %q was not created: %v", socketPath, err)
+	}
+
+	return socketPath
 }
 
 // IntegrationTestPrecheckThrottled runs integration prechecks with throttling.

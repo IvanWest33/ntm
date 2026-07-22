@@ -303,7 +303,15 @@ func runLocalContext(ctx context.Context, args ...string) (string, error) {
 		ctx = context.Background()
 	}
 	binary := BinaryPath()
-	cmd := exec.CommandContext(ctx, binary, args...)
+	localArgs := args
+	// NTM_TMUX_SOCKET_PATH is primarily useful for hermetic integration tests
+	// that must exercise a detached TMUX_PANE without contacting a user's live
+	// tmux server. -S is passed as a separate argv item, so the path is never
+	// interpreted by a shell.
+	if socketPath := strings.TrimSpace(os.Getenv("NTM_TMUX_SOCKET_PATH")); socketPath != "" {
+		localArgs = append([]string{"-S", socketPath}, args...)
+	}
+	cmd := exec.CommandContext(ctx, binary, localArgs...)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -314,7 +322,7 @@ func runLocalContext(ctx context.Context, args ...string) (string, error) {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", ctxErr
 		}
-		return "", fmt.Errorf("%s %s: %w: %s", binary, strings.Join(args, " "), err, stderr.String())
+		return "", fmt.Errorf("%s %s: %w: %s", binary, strings.Join(localArgs, " "), err, stderr.String())
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }

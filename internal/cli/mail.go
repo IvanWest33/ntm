@@ -583,6 +583,15 @@ func loadResolvedSessionAgent(session, projectKey string) (*agentmail.SessionAge
 	if strings.TrimSpace(session) == "" {
 		return nil, nil
 	}
+	if agentName := resolveSessionPaneAgentName(session, projectKey); agentName != "" {
+		now := time.Now()
+		return &agentmail.SessionAgentInfo{
+			AgentName:    agentName,
+			ProjectKey:   projectKey,
+			RegisteredAt: now,
+			LastActiveAt: now,
+		}, nil
+	}
 	return agentmail.LoadBestSessionAgent(session, projectKey)
 }
 
@@ -593,6 +602,13 @@ func resolveSessionPaneAgentName(session, projectKey string) string {
 	paneID := strings.TrimSpace(os.Getenv("TMUX_PANE"))
 	if paneID == "" {
 		return ""
+	}
+
+	// The per-pane identity file is canonical for a detached worker. Consult it
+	// before the session registry, whose saved fallback can describe a different
+	// (currently focused) pane after a resume or worktree handoff.
+	if name, _ := agentmail.ResolveIdentity(projectKey, paneID); strings.TrimSpace(name) != "" {
+		return strings.TrimSpace(name)
 	}
 
 	registry, err := agentmail.LoadBestSessionAgentRegistry(session, projectKey)
