@@ -35,6 +35,27 @@ func skipIfNoTmux(t *testing.T) {
 	if !IsInstalled() {
 		t.Skip("tmux not installed, skipping test")
 	}
+	isolateTmuxTestSocketRoot(t)
+}
+
+// isolateTmuxTestSocketRoot keeps this package's real tmux tests off the
+// user's default server. This package cannot use tests/testutil because that
+// helper imports tmux, so keep the test-only environment setup local.
+func isolateTmuxTestSocketRoot(t *testing.T) {
+	t.Helper()
+
+	socketRoot, err := os.MkdirTemp("/tmp", "ntm-tmux-")
+	if err != nil {
+		t.Fatalf("create isolated tmux socket directory: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(socketRoot); err != nil {
+			t.Errorf("remove isolated tmux socket directory %q: %v", socketRoot, err)
+		}
+	})
+	t.Setenv("TMUX_TMPDIR", socketRoot)
+	t.Setenv("TMUX", "")
+	t.Setenv("NTM_TMUX_SOCKET_PATH", "")
 }
 
 func TestValidateSessionName(t *testing.T) {

@@ -36,6 +36,7 @@ type SessionConfig struct {
 // directory within it, named after the session.
 func CreateTestSession(t *testing.T, logger *TestLogger, config SessionConfig) string {
 	t.Helper()
+	RequireTmuxThrottled(t)
 
 	// Generate unique session/project name
 	name := fmt.Sprintf("ntm_test_%d", time.Now().UnixNano())
@@ -141,6 +142,10 @@ func killSession(logger *TestLogger, name string) {
 // Useful for cleanup in TestMain or after failed tests.
 func KillAllTestSessions(logger *TestLogger) {
 	logger.LogSection("Killing All Test Sessions")
+	if os.Getenv("NTM_TEST_TMUX_ISOLATED") != "1" {
+		logger.Log("Skipping tmux cleanup: no test-owned socket is configured")
+		return
+	}
 
 	withGlobalTmuxTestLock(func() {
 		// List all tmux sessions
@@ -170,6 +175,13 @@ func KillAllTestSessions(logger *TestLogger) {
 // best-effort and intentionally avoids blocking on the global tmux test lock so
 // concurrent package startup can continue under multi-agent test runs.
 func KillAllTestSessionsSilent() int {
+	// Never enumerate or modify the user's shared default server. Package
+	// TestMain runs before a test can call RequireTmuxThrottled, so only a
+	// test that explicitly established its private socket may clean it up.
+	if os.Getenv("NTM_TEST_TMUX_ISOLATED") != "1" {
+		return 0
+	}
+
 	killed := 0
 	if !tryWithGlobalTmuxTestLock(func() {
 		out, err := exec.Command(tmux.BinaryPath(), "list-sessions", "-F", "#{session_name}").Output()

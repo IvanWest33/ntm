@@ -3,6 +3,7 @@ package testutil
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -80,7 +81,32 @@ func TestRequireTmux(t *testing.T) {
 	t.Log("tmux is installed")
 }
 
+func TestRequireTmuxThrottledUsesPrivateSocketRoot(t *testing.T) {
+	RequireTmuxThrottled(t)
+
+	socketRoot := os.Getenv("TMUX_TMPDIR")
+	if !strings.HasPrefix(socketRoot, "/tmp/ntm-tmux-") {
+		t.Fatalf("TMUX_TMPDIR = %q, want a private /tmp/ntm-tmux-* root", socketRoot)
+	}
+	if got := os.Getenv("TMUX"); got != "" {
+		t.Fatalf("TMUX = %q, want detached test environment", got)
+	}
+	if got := os.Getenv("NTM_TEST_TMUX_ISOLATED"); got != "1" {
+		t.Fatalf("NTM_TEST_TMUX_ISOLATED = %q, want 1", got)
+	}
+}
+
+func TestKillAllTestSessionsSilentRequiresPrivateSocket(t *testing.T) {
+	t.Setenv("NTM_TEST_TMUX_ISOLATED", "")
+
+	if got := KillAllTestSessionsSilent(); got != 0 {
+		t.Fatalf("KillAllTestSessionsSilent() = %d without a private socket, want 0", got)
+	}
+}
+
 func TestSessionExists(t *testing.T) {
+	isolateTmuxTmpDir(t)
+
 	// Test with a session that definitely doesn't exist
 	exists := SessionExists("nonexistent_session_" + t.Name())
 	if exists {

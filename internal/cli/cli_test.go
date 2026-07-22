@@ -632,7 +632,7 @@ func TestResolveMessageScopeUsesCurrentPaneRegistryIdentity(t *testing.T) {
 
 func TestLoadResolvedSessionAgentUsesDetachedPaneRegistryIdentity(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
-	testutil.IsolateTmuxSocket(t)
+	socketPath := testutil.IsolateTmuxSocket(t)
 	isolateSessionAgentStorage(t)
 
 	projectsBase := t.TempDir()
@@ -650,6 +650,9 @@ func TestLoadResolvedSessionAgentUsesDetachedPaneRegistryIdentity(t *testing.T) 
 		t.Fatalf("CreateSession(%q): %v", session, err)
 	}
 	t.Cleanup(func() { _ = tmux.KillSession(session) })
+	if err := exec.Command(tmux.BinaryPath(), "-S", socketPath, "has-session", "-t", session).Run(); err != nil {
+		t.Fatalf("test session was not created on named private socket %q: %v", socketPath, err)
+	}
 
 	panes, err := tmux.GetPanes(session)
 	if err != nil {
@@ -680,7 +683,7 @@ func TestLoadResolvedSessionAgentUsesDetachedPaneRegistryIdentity(t *testing.T) 
 
 func TestLoadResolvedSessionAgentPrefersDetachedPaneIdentityFile(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
-	testutil.IsolateTmuxSocket(t)
+	socketPath := testutil.IsolateTmuxSocket(t)
 	isolateSessionAgentStorage(t)
 
 	projectsBase := t.TempDir()
@@ -698,6 +701,9 @@ func TestLoadResolvedSessionAgentPrefersDetachedPaneIdentityFile(t *testing.T) {
 		t.Fatalf("CreateSession(%q): %v", session, err)
 	}
 	t.Cleanup(func() { _ = tmux.KillSession(session) })
+	if err := exec.Command(tmux.BinaryPath(), "-S", socketPath, "has-session", "-t", session).Run(); err != nil {
+		t.Fatalf("test session was not created on named private socket %q: %v", socketPath, err)
+	}
 
 	panes, err := tmux.GetPanes(session)
 	if err != nil {

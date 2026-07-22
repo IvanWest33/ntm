@@ -85,15 +85,14 @@ func RequireTmuxThrottled(t *testing.T) {
 	// multiple packages in parallel.
 	acquireGlobalTmuxTestLock(t)
 	TmuxTestThrottle.AcquireForTest(t)
+	isolateTmuxTmpDir(t)
 }
 
-// IsolateTmuxSocket starts a named tmux server in a test-owned socket
-// directory and routes NTM's local tmux client to it. The test remains
-// detached (TMUX is empty) while TMUX_PANE can still identify its target pane.
-//
-// Use this before any test that creates a tmux session. It deliberately does
-// not call `kill-server`: callers clean up only the test sessions they create.
-func IsolateTmuxSocket(t *testing.T) string {
+// isolateTmuxTmpDir keeps every tmux command in a test that uses the shared
+// precheck away from the live user's default socket. Bare tmux commands use a
+// private `default` socket beneath this directory; tests that need a named
+// socket layer IsolateTmuxSocket on top.
+func isolateTmuxTmpDir(t *testing.T) string {
 	t.Helper()
 
 	// Go's t.TempDir() embeds the full test name, which can exceed Unix-domain
@@ -108,11 +107,26 @@ func IsolateTmuxSocket(t *testing.T) string {
 			t.Errorf("remove isolated tmux socket directory %q: %v", socketRoot, err)
 		}
 	})
-	socketName := fmt.Sprintf("ntm-test-%d", time.Now().UnixNano())
-	socketPath := filepath.Join(socketRoot, fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
-
 	t.Setenv("TMUX_TMPDIR", socketRoot)
 	t.Setenv("TMUX", "")
+	t.Setenv("NTM_TMUX_SOCKET_PATH", "")
+	t.Setenv("NTM_TEST_TMUX_ISOLATED", "1")
+	return socketRoot
+}
+
+// IsolateTmuxSocket starts a named tmux server in a test-owned socket
+// directory and routes NTM's local tmux client to it. The test remains
+// detached (TMUX is empty) while TMUX_PANE can still identify its target pane.
+//
+// Use this before any test that creates a tmux session requiring a specific
+// socket. It deliberately does not call `kill-server`: callers clean up only
+// the test sessions they create.
+func IsolateTmuxSocket(t *testing.T) string {
+	t.Helper()
+
+	socketRoot := isolateTmuxTmpDir(t)
+	socketName := fmt.Sprintf("ntm-test-%d", time.Now().UnixNano())
+	socketPath := filepath.Join(socketRoot, fmt.Sprintf("tmux-%d", os.Getuid()), socketName)
 	t.Setenv("NTM_TMUX_SOCKET_PATH", socketPath)
 
 	cmd := exec.Command(tmux.BinaryPath(), "-L", socketName, "start-server")

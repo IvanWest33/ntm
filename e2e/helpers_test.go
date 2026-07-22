@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
 // SkipIfShort skips the test in short mode.
@@ -24,6 +25,7 @@ func SkipIfNoTmux(t *testing.T) {
 	if !tmux.DefaultClient.IsInstalled() {
 		t.Skip("tmux not found, skipping E2E test")
 	}
+	testutil.RequireTmuxThrottled(t)
 }
 
 // SkipIfNoNTM skips the test if ntm is not available.
