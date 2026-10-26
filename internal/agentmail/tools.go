@@ -623,6 +623,20 @@ func (c *Client) ReservePaths(ctx context.Context, opts FileReservationOptions) 
 
 // ReleaseReservations releases file path reservations.
 func (c *Client) ReleaseReservations(ctx context.Context, projectKey, agentName string, paths []string, ids []int) (*ReleaseReservationsResult, error) {
+	return c.releaseReservations(ctx, projectKey, agentName, paths, ids, "")
+}
+
+// ReleaseTaskReservations releases only reservations whose current reason equals
+// taskID. A distinct server tool prevents older servers from ignoring the scope.
+func (c *Client) ReleaseTaskReservations(ctx context.Context, projectKey, agentName, taskID string, paths []string) (*ReleaseReservationsResult, error) {
+	if strings.TrimSpace(taskID) == "" {
+		return nil, fmt.Errorf("task ID must not be blank")
+	}
+	return c.releaseReservations(ctx, projectKey, agentName, paths, nil, taskID)
+}
+
+func (c *Client) releaseReservations(ctx context.Context, projectKey, agentName string, paths []string, ids []int, taskID string) (*ReleaseReservationsResult, error) {
+	tool := "release_file_reservations"
 	args := map[string]interface{}{
 		"project_key": projectKey,
 		"agent_name":  agentName,
@@ -633,16 +647,20 @@ func (c *Client) ReleaseReservations(ctx context.Context, projectKey, agentName 
 	if len(ids) > 0 {
 		args["file_reservation_ids"] = ids
 	}
+	if taskID != "" {
+		tool = "release_task_file_reservations"
+		args["task_id"] = taskID
+	}
 
 	c.attachRegistrationToken(args)
-	result, err := c.callTool(ctx, "release_file_reservations", args)
+	result, err := c.callTool(ctx, tool, args)
 	if err != nil {
 		return nil, err
 	}
 
 	var releaseResult ReleaseReservationsResult
 	if err := json.Unmarshal(result, &releaseResult); err != nil {
-		return nil, NewAPIError("release_file_reservations", 0, err)
+		return nil, NewAPIError(tool, 0, err)
 	}
 
 	return &releaseResult, nil
