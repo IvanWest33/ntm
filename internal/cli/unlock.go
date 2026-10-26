@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/spf13/cobra"
 )
 
@@ -22,6 +24,11 @@ func newUnlockCmd() *cobra.Command {
 
 Without patterns, you must use --all to release all reservations.
 
+With --task-id, release only reservations whose current reason exactly matches
+that task, including with --all. Task ownership is checked atomically by Agent
+Mail. An older server without task-scoped release returns an error; no unscoped
+release is attempted.
+
 When --pane and --task-id are supplied, the JSON envelope includes a
 ReleaseReceipt block — the unlock-side mirror of the dispatch receipt
 emitted by ` + "`ntm assign`" + ` (ntm#128/#129). Wrappers can drop their
@@ -31,10 +38,14 @@ released which path for which task.
 Examples:
   ntm unlock myproject "src/api/**"       # Release specific pattern
   ntm unlock myproject --all              # Release all reservations
+  ntm unlock myproject --all --task-id=br-123 # Release only this task's reservations
   ntm unlock myproject "*.go" "*.json"    # Release multiple patterns
   ntm unlock myproject "src/api/x.go" --pane=2 --task-id=br-123 --json`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("task-id") && strings.TrimSpace(taskID) == "" {
+				return fmt.Errorf("--task-id must not be blank")
+			}
 			session := args[0]
 			patterns := args[1:]
 			return runUnlock(session, patterns, all, paneIdx, taskID)
@@ -43,7 +54,7 @@ Examples:
 
 	cmd.Flags().BoolVar(&all, "all", false, "Release all reservations for this session")
 	cmd.Flags().IntVar(&paneIdx, "pane", -1, "Pane index that originally held the reservation (for the release receipt; ntm#129)")
-	cmd.Flags().StringVar(&taskID, "task-id", "", "Work-item id that owned the reservation (for the release receipt; ntm#129)")
+	cmd.Flags().StringVar(&taskID, "task-id", "", "Release only reservations whose current reason equals this work-item id")
 
 	return cmd
 }
@@ -87,6 +98,9 @@ type ReleaseConflict struct {
 }
 
 func runUnlock(session string, patterns []string, all bool, paneIdx int, taskID string) error {
+	if taskID != "" && strings.TrimSpace(taskID) == "" {
+		return fmt.Errorf("--task-id must not be blank")
+	}
 	if len(patterns) == 0 && !all {
 		return fmt.Errorf("specify patterns to release or use --all")
 	}
@@ -135,7 +149,12 @@ func runUnlock(session string, patterns []string, all bool, paneIdx int, taskID 
 		pathsToRelease = patterns
 	}
 
-	releaseResult, err := client.ReleaseReservations(ctx, projectKey, sessionAgent.AgentName, pathsToRelease, nil)
+	var releaseResult *agentmail.ReleaseReservationsResult
+	if taskID != "" {
+		releaseResult, err = client.ReleaseTaskReservations(ctx, projectKey, sessionAgent.AgentName, taskID, pathsToRelease)
+	} else {
+		releaseResult, err = client.ReleaseReservations(ctx, projectKey, sessionAgent.AgentName, pathsToRelease, nil)
+	}
 	result := UnlockResult{Session: session, Agent: sessionAgent.AgentName}
 	if releaseResult != nil && releaseResult.ReleasedAt != nil {
 		t := releaseResult.ReleasedAt.Time

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -23,27 +24,28 @@ import (
 )
 
 type mailStub struct {
-	server             *httptest.Server
-	inbox              []agentmail.InboxMessage
-	listAgents         []agentmail.Agent
-	reservations       []agentmail.FileReservation
-	fetchCalls         []fetchCall
-	listCalls          []listCall
-	reserveCalls       []reserveCall
-	readIDs            []int
-	ackIDs             []int
-	readAgents         []string
-	ackAgents          []string
-	ensureCalled       int
-	ensureProjectKeys  []string
-	overseerCalls      []overseerCall
-	releaseCalls       []releaseCall
-	renewCalls         []renewCall
-	forceReleaseCalls  []forceReleaseCall
-	releaseResult      agentmail.ReleaseReservationsResult
-	renewResult        agentmail.RenewReservationsResult
-	forceReleaseResult agentmail.ForceReleaseResult
-	failIDs            map[int]string // messageID -> error message
+	server                 *httptest.Server
+	inbox                  []agentmail.InboxMessage
+	listAgents             []agentmail.Agent
+	reservations           []agentmail.FileReservation
+	fetchCalls             []fetchCall
+	listCalls              []listCall
+	reserveCalls           []reserveCall
+	readIDs                []int
+	ackIDs                 []int
+	readAgents             []string
+	ackAgents              []string
+	ensureCalled           int
+	ensureProjectKeys      []string
+	overseerCalls          []overseerCall
+	releaseCalls           []releaseCall
+	renewCalls             []renewCall
+	forceReleaseCalls      []forceReleaseCall
+	releaseResult          agentmail.ReleaseReservationsResult
+	releaseTaskUnsupported bool
+	renewResult            agentmail.RenewReservationsResult
+	forceReleaseResult     agentmail.ForceReleaseResult
+	failIDs                map[int]string // messageID -> error message
 }
 
 type fetchCall struct {
@@ -55,6 +57,8 @@ type fetchCall struct {
 }
 
 type releaseCall struct {
+	Tool    string
+	TaskID  string
 	Agent   string
 	Project string
 	Paths   []string
@@ -275,8 +279,14 @@ func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 				return
 			}
 			writeResponse(map[string]interface{}{})
-		case "release_file_reservations":
+		case "release_file_reservations", "release_task_file_reservations":
+			if name == "release_task_file_reservations" && stub.releaseTaskUnsupported {
+				writeError(w, rpc.ID, -32601, "unknown tool: release_task_file_reservations")
+				return
+			}
 			stub.releaseCalls = append(stub.releaseCalls, releaseCall{
+				Tool:    name,
+				TaskID:  toString(args["task_id"]),
 				Agent:   toString(args["agent_name"]),
 				Project: toString(args["project_key"]),
 				Paths:   toStringSlice(args["paths"]),
@@ -841,6 +851,62 @@ func TestMailAckWithAllSkipsMessagesWithoutAckRequirement(t *testing.T) {
 
 	if len(stub.ackIDs) != 1 || stub.ackIDs[0] != 2 {
 		t.Fatalf("expected only ack-required message to be acknowledged, got %v", stub.ackIDs)
+	}
+}
+
+func TestRunUnlockTaskScope(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		all         bool
+		patterns    []string
+		released    int
+		unsupported bool
+	}{
+		{name: "all", all: true, released: 2},
+		{name: "specific", patterns: []string{"src/a.go"}, released: 1},
+		{name: "already released", all: true},
+		{name: "old server never falls back", all: true, unsupported: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetFlags()
+			isolateSessionAgentStorage(t)
+			saveSessionAgentForTest(t, "unlock-task", GetProjectRoot(), "BlueLake")
+			stub := newMailStub(t, nil)
+			defer stub.Close()
+			stub.releaseResult = agentmail.ReleaseReservationsResult{Released: tc.released}
+			stub.releaseTaskUnsupported = tc.unsupported
+			t.Setenv("AGENT_MAIL_URL", stub.server.URL+"/")
+			// A pane is not required for task ownership enforcement.
+			err := runUnlock("unlock-task", tc.patterns, tc.all, -1, "bd-task-a")
+			if tc.unsupported {
+				if err == nil || len(stub.releaseCalls) != 0 {
+					t.Fatalf("old server: err=%v, release calls=%v", err, stub.releaseCalls)
+				}
+				return
+			}
+			if err != nil || len(stub.releaseCalls) != 1 {
+				t.Fatalf("unlock: err=%v, calls=%v", err, stub.releaseCalls)
+			}
+			call := stub.releaseCalls[0]
+			if call.Tool != "release_task_file_reservations" || call.TaskID != "bd-task-a" || call.Agent != "BlueLake" {
+				t.Fatalf("wrong release scope: %+v", call)
+			}
+			if len(call.Paths) != len(tc.patterns) || (len(tc.patterns) > 0 && call.Paths[0] != tc.patterns[0]) {
+				t.Fatalf("wrong paths: %v", call.Paths)
+			}
+		})
+	}
+}
+
+func TestUnlockRejectsExplicitBlankTaskID(t *testing.T) {
+	for _, value := range []string{"", "  "} {
+		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
+			cmd := newUnlockCmd()
+			cmd.SetArgs([]string{"test", "--all", "--task-id=" + value})
+			if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "must not be blank") {
+				t.Fatalf("expected early task validation, got %v", err)
+			}
+		})
 	}
 }
 
